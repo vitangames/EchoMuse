@@ -55,7 +55,7 @@ always-on machine.
 <summary><b>As a Home Assistant add-on</b></summary>
 
 Settings → Add-ons → Add-on Store → ⋮ → **Repositories**, paste
-`https://github.com/wilbowes/EchoMuse`, then install **EchoMuse** from the
+`https://github.com/vitangames/EchoMuse`, then install **EchoMuse Recorder** from the
 store. The README has a one-click badge for adding the repository.
 
 The dashboard appears as a **sidebar panel** — it is reached through Home

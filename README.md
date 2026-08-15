@@ -133,10 +133,10 @@ docker compose -f docker-compose.deploy.yml up -d
 ### Or, as a Home Assistant add-on
 
 If Home Assistant runs the Supervisor (HA OS, or Supervised), install this
-repository as an add-on repository and add "EchoMuse" from the Add-on Store
+repository as an add-on repository and add **EchoMuse Recorder** from the Add-on Store
 — no separate Docker host needed.
 
-[![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fwilbowes%2FEchoMuse)
+[![Open your Home Assistant instance and show the add add-on repository dialog with this repository pre-filled.](https://my.home-assistant.io/badges/supervisor_add_addon_repository.svg)](https://my.home-assistant.io/redirect/supervisor_add_addon_repository/?repository_url=https%3A%2F%2Fgithub.com%2Fvitangames%2FEchoMuse)
 
 Open the dashboard — `http://<SERVER_IP>:8768` for the Docker install, or the
 add-on's **Open Web UI** button / sidebar panel for the add-on install. From
@@ -151,7 +151,7 @@ See the [quickstart](docs/quickstart.md) for the full walkthrough and
 [configuration](docs/configuration.md) for every knob explained in plain
 language.
 
-Images are published to `ghcr.io/wilbowes/echomuse-controller` from
+This recorder build is published to `ghcr.io/vitangames/echomuse-controller` from
 `controller-v*` tags; device firmware binaries are released from plain
 `v*` tags (see Releases).
 
