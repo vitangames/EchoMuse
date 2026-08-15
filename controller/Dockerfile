@@ -1,8 +1,8 @@
 FROM python:3.12-slim
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
-LABEL org.opencontainers.image.source="https://github.com/wilbowes/EchoMuse" \
-      org.opencontainers.image.description="EchoMuse controller — Echo Dot Gen 2 open-source voice assistant satellite"
+LABEL org.opencontainers.image.source="https://github.com/vitangames/EchoMuse" \
+      org.opencontainers.image.description="EchoMuse 2.19 controller with a passive real wake-word recorder"
 WORKDIR /app
 # Install curl for vendoring JS dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
@@ -79,6 +79,7 @@ COPY em_tap_burst.py .
 COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
+COPY em_wake_recorder.py .
 COPY em_turnclock.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)

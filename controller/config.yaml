@@ -1,9 +1,9 @@
-name: "EchoMuse"
+name: "EchoMuse Recorder"
 # Tracks the published controller image tag, which controller-release.yml
 # derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
 # both together: Supervisor pulls `image:version`, so a version with no
 # matching tag on GHCR fails to install.
-version: "2.19.0"
+version: "2.19.0-recorder.1"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
@@ -19,10 +19,10 @@ version: "2.19.0"
 # add-on changes before they reach main (Supervisor clones the default
 # branch), and "it compiles onnxruntime" made that loop look far more
 # expensive than it is. tools/make_dev_addon.sh packages one.
-image: "ghcr.io/wilbowes/echomuse-controller"
+image: "ghcr.io/vitangames/echomuse-controller"
 slug: "controller"
-description: "Local, open-source voice assistant controller for rooted Echo Dot 2nd Gen devices — wake word, fleet dashboard, and Home Assistant integration via ESPHome."
-url: "https://github.com/wilbowes/EchoMuse"
+description: "EchoMuse 2.19 with passive real wake-word recording from the Echo Dot microphone stream."
+url: "https://github.com/vitangames/EchoMuse"
 init: false
 arch:
   - aarch64
@@ -43,7 +43,7 @@ ingress_port: 8768
 # read-only until promoted.
 panel_admin: true
 panel_icon: mdi:microphone-message
-panel_title: EchoMuse
+panel_title: EchoMuse Recorder
 environment:
   ECHOMUSE_HOME_ASSISTANT_INGRESS: "true"
   # /data is the add-on's own persistent storage, provided automatically by

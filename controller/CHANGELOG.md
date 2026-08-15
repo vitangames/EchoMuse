@@ -1,5 +1,18 @@
 # Changelog
 
+## 2.19.0-recorder.1
+
+- Based on the official EchoMuse Controller 2.19 Home Assistant add-on.
+- Adds a passive recorder to each Echo Dot device page. It saves 16 kHz mono
+  PCM16 WAV clips from the same continuous microphone stream used by
+  openWakeWord, without consuming or rerouting the detector audio.
+- Supports single captures and short series, with phrase, distance,
+  environment, notes, playback, download, deletion, and a JSONL manifest.
+- Stores recordings under `/data/wake_samples`, so Home Assistant preserves
+  them across add-on restarts and updates.
+- Includes the latest upstream Home Assistant ingress, authentication, and
+  automatic server-address fixes available after the 2.19.0 tag.
+
 ## 2.20.0-ea.1 — Early Access
 
 - **Leaving "Server IP" empty now detects this host's LAN address.** The old

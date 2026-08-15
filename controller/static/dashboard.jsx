@@ -952,6 +952,299 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
   );
 }
 
+// ─── Real wake-word sample recorder ─────────────────────────────────────────
+//
+// This does not use the browser microphone. It arms the passive recorder on
+// the selected Echo, whose controller-side tap sees the exact PCM frames that
+// continue on to openWakeWord. A short client-managed series is just repeated
+// single captures; the backend remains one bounded recording at a time.
+function WakeWordRecorder({ device }) {
+  const [phrase, setPhrase] = useState(() => {
+    try { return localStorage.getItem('em-wake-recorder-target') || ''; }
+    catch { return ''; }
+  });
+  const [distance, setDistance] = useState('');
+  const [environment, setEnvironment] = useState('');
+  const [notes, setNotes] = useState('');
+  const [durationMs, setDurationMs] = useState(3000);
+  const [seriesCount, setSeriesCount] = useState(5);
+  const [data, setData] = useState(null);
+  const [loading, setLoading] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [seriesActive, setSeriesActive] = useState(false);
+  const [seriesDone, setSeriesDone] = useState(0);
+  const [seriesGoal, setSeriesGoal] = useState(0);
+  const remainingRef = useRef(0);
+  const lastSavedRef = useRef(null);
+  const sessionRef = useRef('');
+  const audioRef = useRef(null);
+
+  const targetQuery = encodeURIComponent(phrase.trim());
+  const recorder = data?.recorder || { state: device.connected ? 'idle' : 'offline', progress: 0 };
+  const samples = data?.samples || [];
+  const busy = recorder.state === 'recording' || recorder.state === 'saving';
+
+  const load = useCallback(async () => {
+    try {
+      const result = await API.get(
+        `/api/devices/${device.device_id}/wake-recorder?target=${targetQuery}`);
+      setData(result);
+    } catch (e) {
+      setActionError(e.error || 'Could not load recorder state');
+    }
+  }, [device.device_id, targetQuery]);
+
+  useEffect(() => {
+    let live = true;
+    const refresh = async () => { if (live) await load(); };
+    refresh();
+    const iv = setInterval(refresh, busy || seriesActive ? 250 : 1200);
+    return () => { live = false; clearInterval(iv); };
+  }, [load, busy, seriesActive]);
+
+  useEffect(() => () => {
+    if (audioRef.current) {
+      audioRef.current.pause();
+      URL.revokeObjectURL(audioRef.current.src);
+    }
+  }, []);
+
+  const startCapture = useCallback(async () => {
+    const target = phrase.trim();
+    if (!target) {
+      setActionError('Enter the wake phrase first');
+      setSeriesActive(false);
+      return;
+    }
+    setActionError('');
+    setLoading(true);
+    try {
+      try { localStorage.setItem('em-wake-recorder-target', target); } catch {}
+      const result = await API.post(
+        `/api/devices/${device.device_id}/wake-recorder/start`, {
+          target_phrase: target,
+          duration_ms: durationMs,
+          distance,
+          environment,
+          notes,
+          session_id: sessionRef.current,
+        });
+      setData(old => ({ ...(old || {}), recorder: result.recorder,
+                        samples: old?.samples || [], count: old?.count || 0 }));
+    } catch (e) {
+      setActionError(e.error || 'Could not start recording');
+      setSeriesActive(false);
+      remainingRef.current = 0;
+    } finally {
+      setLoading(false);
+    }
+  }, [device.device_id, phrase, durationMs, distance, environment, notes]);
+
+  // A newly saved sample is the clock for series mode. Wait 1.5 seconds so
+  // the speaker can breathe/reposition, then arm the next independent WAV.
+  const lastSampleId = recorder.last_sample?.sample_id || null;
+  useEffect(() => {
+    if (!seriesActive || !lastSampleId || lastSavedRef.current === lastSampleId) return;
+    lastSavedRef.current = lastSampleId;
+    remainingRef.current = Math.max(0, remainingRef.current - 1);
+    const done = seriesGoal - remainingRef.current;
+    setSeriesDone(done);
+    if (remainingRef.current === 0) {
+      setSeriesActive(false);
+      return;
+    }
+    const timer = setTimeout(startCapture, 1500);
+    return () => clearTimeout(timer);
+  }, [lastSampleId, seriesActive, seriesGoal, startCapture]);
+
+  useEffect(() => {
+    if (recorder.state === 'error') {
+      setActionError(recorder.error || 'Recording failed');
+      setSeriesActive(false);
+      remainingRef.current = 0;
+    }
+  }, [recorder.state, recorder.error]);
+
+  function beginSeries(count) {
+    const n = Math.max(1, Math.min(20, Number(count) || 1));
+    if (!phrase.trim()) { setActionError('Enter the wake phrase first'); return; }
+    sessionRef.current = `${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    lastSavedRef.current = lastSampleId;
+    remainingRef.current = n;
+    setSeriesGoal(n);
+    setSeriesDone(0);
+    setSeriesActive(true);
+    startCapture();
+  }
+
+  async function cancel() {
+    setSeriesActive(false);
+    remainingRef.current = 0;
+    try {
+      await API.post(`/api/devices/${device.device_id}/wake-recorder/cancel`, {});
+      await load();
+    } catch (e) { setActionError(e.error || 'Could not cancel recording'); }
+  }
+
+  function samplePath(sample) {
+    return `/api/devices/${device.device_id}/wake-samples/${sample.sample_id}/audio?target=${targetQuery}`;
+  }
+
+  async function play(sample) {
+    try {
+      if (audioRef.current) {
+        audioRef.current.pause();
+        URL.revokeObjectURL(audioRef.current.src);
+      }
+      const blob = await API.blob(samplePath(sample));
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      audioRef.current = audio;
+      audio.onended = () => { URL.revokeObjectURL(url); audioRef.current = null; };
+      await audio.play();
+    } catch (e) { setActionError(e.error || 'Could not play sample'); }
+  }
+
+  async function download(sample) {
+    try {
+      const blob = await API.blob(samplePath(sample));
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      a.download = `${phrase.trim().replace(/\s+/g, '_')}-${sample.sample_id.slice(0, 8)}.wav`;
+      a.click();
+      setTimeout(() => URL.revokeObjectURL(url), 1000);
+    } catch (e) { setActionError(e.error || 'Could not download sample'); }
+  }
+
+  async function remove(sample) {
+    if (!confirm('Delete this wake-word sample?')) return;
+    try {
+      await API.del(
+        `/api/devices/${device.device_id}/wake-samples/${sample.sample_id}?target=${targetQuery}`);
+      await load();
+    } catch (e) { setActionError(e.error || 'Could not delete sample'); }
+  }
+
+  const fieldStyle = {
+    width: '100%', padding: '8px 10px', borderRadius: 6,
+    border: '1px solid var(--border)', background: 'var(--sunken)',
+    color: 'var(--text)', fontFamily: "'DM Mono',monospace", fontSize: 11,
+  };
+  const labelStyle = {
+    display: 'block', fontFamily: "'DM Mono',monospace", fontSize: 9,
+    color: 'var(--muted)', textTransform: 'uppercase', letterSpacing: '0.1em',
+    marginBottom: 5,
+  };
+
+  return (
+    <div style={{ display:'grid', gap:14 }}>
+      <Panel label="Real wake-word recorder">
+        <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--text2)', lineHeight:1.6, marginBottom:14 }}>
+          Audio comes from <strong>{device.label || device.device_id}</strong>, not this browser.
+          The same 16 kHz mono PCM stream continues to openWakeWord while a passive copy is saved.
+        </div>
+
+        <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fit,minmax(190px,1fr))', gap:12 }}>
+          <label><span style={labelStyle}>Target phrase</span>
+            <input value={phrase} disabled={busy || seriesActive}
+              placeholder="e.g. Василий" style={fieldStyle}
+              onChange={e => setPhrase(e.target.value)}/>
+          </label>
+          <label><span style={labelStyle}>Distance</span>
+            <input value={distance} disabled={busy || seriesActive}
+              placeholder="e.g. 3 m" style={fieldStyle}
+              onChange={e => setDistance(e.target.value)}/>
+          </label>
+          <label><span style={labelStyle}>Environment</span>
+            <input value={environment} disabled={busy || seriesActive}
+              placeholder="quiet / TV / kitchen" style={fieldStyle}
+              onChange={e => setEnvironment(e.target.value)}/>
+          </label>
+          <label><span style={labelStyle}>Notes</span>
+            <input value={notes} disabled={busy || seriesActive}
+              placeholder="side angle, quiet voice…" style={fieldStyle}
+              onChange={e => setNotes(e.target.value)}/>
+          </label>
+        </div>
+
+        <div style={{ display:'flex', alignItems:'end', gap:10, flexWrap:'wrap', marginTop:16 }}>
+          <label style={{ width:125 }}><span style={labelStyle}>Clip length</span>
+            <select value={durationMs} disabled={busy || seriesActive} style={fieldStyle}
+              onChange={e => setDurationMs(Number(e.target.value))}>
+              <option value={2000}>2.0 seconds</option>
+              <option value={2500}>2.5 seconds</option>
+              <option value={3000}>3.0 seconds</option>
+              <option value={4000}>4.0 seconds</option>
+            </select>
+          </label>
+          <Pill accent big disabled={!device.connected || device.muted || busy || loading || seriesActive}
+            onClick={() => beginSeries(1)}>● Record</Pill>
+          <label style={{ width:82 }}><span style={labelStyle}>Series</span>
+            <input type="number" min="2" max="20" value={seriesCount}
+              disabled={busy || seriesActive} style={fieldStyle}
+              onChange={e => setSeriesCount(Math.max(2, Math.min(20, Number(e.target.value) || 2)))}/>
+          </label>
+          <Pill disabled={!device.connected || device.muted || busy || loading || seriesActive}
+            onClick={() => beginSeries(seriesCount)}>Record series</Pill>
+          {(busy || seriesActive || recorder.state === 'error') &&
+            <Pill danger onClick={cancel}>Cancel</Pill>}
+        </div>
+
+        <div style={{ marginTop:14, background:'var(--lcd-bg)', border:'1px solid var(--lcd-line)', borderRadius:6, padding:'10px 12px' }}>
+          <div style={{ display:'flex', justifyContent:'space-between', fontFamily:"'DM Mono',monospace", fontSize:10 }}>
+            <span style={{ color: recorder.state === 'error' ? 'var(--warn)' : busy ? 'var(--lcd-amber)' : 'var(--lcd-green)' }}>
+              {recorder.state === 'recording' ? 'RECORDING — speak now'
+                : recorder.state === 'saving' ? 'SAVING WAV…'
+                : recorder.state === 'offline' ? 'DEVICE OFFLINE'
+                : recorder.state === 'error' ? 'RECORDING ERROR'
+                : seriesActive ? 'NEXT CLIP IN 1.5s'
+                : 'READY'}
+            </span>
+            <span style={{ color:'var(--lcd-dim)' }}>
+              {seriesGoal ? `${seriesDone}/${seriesGoal} this series · ` : ''}{data?.count || 0} saved
+            </span>
+          </div>
+          <div style={{ height:5, marginTop:8, background:'var(--lcd-deep)', borderRadius:3, overflow:'hidden' }}>
+            <div style={{ height:'100%', width:`${Math.round((recorder.progress || 0) * 100)}%`, background:'var(--lcd-amber)', transition:'width 0.08s linear' }}/>
+          </div>
+        </div>
+
+        {actionError && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--warn)', marginTop:10 }}>{actionError}</div>}
+        {!device.connected && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--warn)', marginTop:10 }}>The Echo must be connected before recording.</div>}
+        {device.muted && <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--warn)', marginTop:10 }}>The Echo is muted — unmute it before recording.</div>}
+      </Panel>
+
+      <Panel label={`Saved samples — ${data?.count || 0}`}>
+        {!phrase.trim() ? (
+          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>Enter a target phrase to show its samples.</div>
+        ) : samples.length === 0 ? (
+          <div style={{ fontFamily:"'DM Mono',monospace", fontSize:10, color:'var(--muted)' }}>No samples for this phrase and Echo yet.</div>
+        ) : (
+          <div style={{ display:'grid', gap:5 }}>
+            {samples.map(sample => (
+              <div key={sample.sample_id} style={{ display:'grid', gridTemplateColumns:'minmax(120px,1fr) minmax(120px,1.5fr) auto', gap:10, alignItems:'center', borderBottom:'1px solid var(--hairline)', padding:'7px 0' }}>
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--text2)' }}>
+                  {new Date(sample.created_at * 1000).toLocaleString()}<br/>
+                  <span style={{ color:'var(--muted)' }}>{(sample.duration_ms / 1000).toFixed(1)}s · {sample.sample_id.slice(0,8)}</span>
+                </div>
+                <div style={{ fontFamily:"'DM Mono',monospace", fontSize:9, color:'var(--muted)', overflow:'hidden', textOverflow:'ellipsis' }}>
+                  {[sample.distance, sample.environment, sample.notes].filter(Boolean).join(' · ') || 'no notes'}
+                </div>
+                <div style={{ display:'flex', gap:5 }}>
+                  <Pill small onClick={() => play(sample)}>Play</Pill>
+                  <Pill small onClick={() => download(sample)}>Save</Pill>
+                  <Pill small danger onClick={() => remove(sample)}>Delete</Pill>
+                </div>
+              </div>
+            ))}
+          </div>
+        )}
+      </Panel>
+    </div>
+  );
+}
+
 // ─── Connectivity tab ─────────────────────────────────────────────────────────
 // Per-device WiFi: shows the current connection and drives the safe network
 // switch (device-side executor with auto-rollback — see internal/wifi in the
@@ -1161,7 +1454,7 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
   const needsUpdate = device.firmware_ver && release?.version && device.firmware_ver !== release.version;
 
   const TABS = device.approved
-    ? (isAdmin ? ['status', 'activity', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
+    ? (isAdmin ? ['status', 'activity', 'record', 'config', 'console', 'updates', 'logs'] : ['status', 'activity', 'config', 'logs'])
     : ['approve'];
 
   useEffect(() => {
@@ -1748,6 +2041,11 @@ function Detail({ device, token, onClose, onApprove, isAdmin, globalConfig, onDe
               </div>
             );
           })()}
+
+          {/* RECORD — passive copy of this Echo's continuous wake stream. */}
+          {tab === 'record' && (
+            <WakeWordRecorder device={device}/>
+          )}
 
           {/* CONFIG */}
           {tab === 'config' && (

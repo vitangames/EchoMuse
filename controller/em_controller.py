@@ -80,6 +80,7 @@ import em_esphome as esphome
 import em_ble_proxy
 import em_oww_models
 import em_player
+import em_wake_recorder
 
 _LOG_FORMAT = "%(asctime)s [%(levelname)s] %(name)s — %(message)s"
 
@@ -309,6 +310,10 @@ class Device:
         # _persist_turn (which owns the write — it has the rowid the
         # filename is keyed on) and consumed there.
         self.last_utterance_pcm: bytes | None = None
+        # Passive training-sample tap. handle_data feeds it a COPY of every
+        # incoming PCM frame before choosing mic_queue vs voice_queue, so a
+        # recording never consumes, delays or reroutes openWakeWord audio.
+        self.wake_recorder = em_wake_recorder.Recorder(device_id)
         self.eq_bands:      list  = [0.0] * 8
         self.eq_loudness:   bool  = False
         # LED ring scene — render-ready palette/spinner from em_scenes,
@@ -2893,6 +2898,24 @@ async def handle_control(ws: WebSocketServerProtocol, secure: bool = False):
 
 # ─── Data plane handler ───────────────────────────────────────────────────────
 
+async def _persist_wake_sample(device: Device,
+                               capture: em_wake_recorder.Capture) -> None:
+    """Write a completed passive capture without blocking the mic stream."""
+    loop = asyncio.get_running_loop()
+    try:
+        row = await loop.run_in_executor(
+            None, em_wake_recorder.save_capture, capture, DB_PATH
+        )
+        device.wake_recorder.mark_saved(row)
+        log.info(
+            f"[{device.device_id}] Wake sample saved: "
+            f"{row['target_phrase']!r} {row['duration_ms']}ms "
+            f"({row['sample_id']})"
+        )
+    except Exception as exc:
+        device.wake_recorder.fail(f"Could not save recording: {exc}")
+        log.exception(f"[{device.device_id}] Could not save wake sample")
+
 async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
     device = None
     remote = ws.remote_address
@@ -2955,6 +2978,17 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
                     log.error(f"[{device.device_id}] VAD sentinel lost — queue still full after drain")
                 continue
             payload = raw[MIC_HEADER_LEN:]
+            # Passive branch of the continuous PCM stream. feed() is bounded
+            # bytearray work only; disk I/O starts in an executor after the
+            # requested sample is complete. The original payload still takes
+            # its normal route below and is never mutated or consumed here.
+            capture = device.wake_recorder.feed(payload)
+            if capture is not None:
+                task = asyncio.create_task(
+                    _persist_wake_sample(device, capture),
+                    name=f"wake-sample-{device.device_id}-{capture.sample_id[:8]}",
+                )
+                task.add_done_callback(_log_task_exception)
             q = device.voice_queue if device.oww_paused.is_set() else device.mic_queue
             try:
                 q.put_nowait(payload)
@@ -2980,6 +3014,7 @@ async def handle_data(ws: WebSocketServerProtocol, secure: bool = False):
 
     finally:
         if device:
+            device.wake_recorder.fail("Device audio stream disconnected")
             if device.data_ws is ws:
                 device.data_ws = None
                 device.data_ready.clear()

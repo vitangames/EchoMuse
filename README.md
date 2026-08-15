@@ -18,6 +18,12 @@ hear the answer through the Dot's speaker. The hardware you already own
 - **Custom wake words** — train your own ("hey biscuit") from synthetic TTS
   speech with the bundled [`oww_forge/`](oww_forge/README.md) trainer, then
   install it from the dashboard in one click.
+- **Real wake-word recorder** — the per-device **Record** tab passively taps
+  the same continuous 16 kHz mono PCM stream the controller sends to
+  openWakeWord. Capture one sample or a short series, annotate distance and
+  environment, then listen to or download the WAVs. The detector keeps
+  receiving its original frames throughout; this is a copy, not a new audio
+  path.
 - **On-device wake word (experimental)** — the Echo can run the wake model
   itself and report what it *would* have detected, without acting on it, so
   the two can be compared on identical audio before anything depends on it.
@@ -178,6 +184,19 @@ synthetic TTS speech — no voice recordings needed (though you can add real
 ones to sharpen accuracy). It's a standalone Docker batch job with a web
 UI; the output is a small `.onnx` you upload straight from the dashboard's
 Wake word panel, where it appears as a tile next to the stock models.
+
+For samples made with the actual Echo microphone path, open that Echo in the
+controller dashboard and choose **Record**. Enter the phrase, optionally add
+distance/environment notes, and record a single 1.5–5 second clip or a series.
+The browser microphone is never used: each WAV is copied from the Echo's
+continuous wake stream and stored as 16 kHz mono PCM16 under
+`wake_samples/<phrase>/` beside `echomuse.db`. A `manifest.jsonl` in the same
+folder records the device, UTC timestamp, session, phrase and collection
+notes. This directory is inside the controller's existing persisted data
+volume, so samples survive image upgrades and can be copied into
+`oww_forge` for training. Keep whole `session_id` groups together when
+splitting train/test data; putting near-identical clips from one room session
+on both sides makes evaluation look better than real-world performance.
 
 ---
 

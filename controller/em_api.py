@@ -60,6 +60,7 @@ import em_oww_models
 import em_pki
 import em_player
 import em_recordings
+import em_wake_recorder
 import em_scenes
 import em_shadow
 import em_support
@@ -293,6 +294,11 @@ async def create_app() -> web.Application:
     app.router.add_get("/api/devices/{id}/turns",         _get_device_turns)
     app.router.add_get("/api/devices/{id}/activity",      _get_device_activity)
     app.router.add_get("/api/devices/{id}/turns/{turn}/audio", _get_turn_audio)
+    app.router.add_get("/api/devices/{id}/wake-recorder", _get_wake_recorder)
+    app.router.add_post("/api/devices/{id}/wake-recorder/start", _post_wake_recorder_start)
+    app.router.add_post("/api/devices/{id}/wake-recorder/cancel", _post_wake_recorder_cancel)
+    app.router.add_get("/api/devices/{id}/wake-samples/{sample}/audio", _get_wake_sample_audio)
+    app.router.add_delete("/api/devices/{id}/wake-samples/{sample}", _delete_wake_sample)
     app.router.add_post("/api/devices/{id}/wifi",         _post_device_wifi)
     app.router.add_post("/api/devices/{id}/wifi/scan",    _post_device_wifi_scan)
     app.router.add_post("/api/devices/{id}/update",       _post_device_update)
@@ -728,6 +734,151 @@ async def _get_turn_audio(request: web.Request) -> web.Response:
             "Cache-Control":       "private, max-age=60",
         },
     )
+
+
+async def _device_row(device_id: str):
+    loop = asyncio.get_running_loop()
+    return await loop.run_in_executor(None, db.get_device, device_id)
+
+
+@auth.require_auth
+async def _get_wake_recorder(request: web.Request) -> web.Response:
+    """Recorder state and saved real wake-word samples for one Echo."""
+    device_id = request.match_info["id"]
+    row = await _device_row(device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+
+    target = request.query.get("target", "").strip()
+    live = _devices.get(device_id)
+    state = (
+        live.wake_recorder.status()
+        if live is not None and hasattr(live, "wake_recorder")
+        else {
+            "state": "offline", "sample_id": None, "target_phrase": None,
+            "duration_ms": 0, "captured_ms": 0, "progress": 0.0,
+            "error": None, "last_sample": None,
+        }
+    )
+    samples: list[dict] = []
+    count = 0
+    if target:
+        if em_wake_recorder.target_key(target) is None:
+            return _error("bad_target", "Target phrase is invalid", 400)
+        loop = asyncio.get_running_loop()
+        samples, count = await loop.run_in_executor(
+            None,
+            lambda: em_wake_recorder.list_samples(
+                target, device_id, db_path=None, limit=500
+            ),
+        )
+    return _ok({
+        "recorder": state,
+        "samples": samples,
+        "count": count,
+        "format": {"sample_rate": 16000, "channels": 1, "encoding": "PCM16"},
+    })
+
+
+@auth.require_admin
+async def _post_wake_recorder_start(request: web.Request) -> web.Response:
+    """Arm a passive 1.5–5s capture on the live continuous mic stream."""
+    device_id = request.match_info["id"]
+    row = await _device_row(device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    live = _devices.get(device_id)
+    if live is None or live.data_ws is None:
+        return _error("device_offline", "Device audio stream is offline", 409)
+    if live.muted:
+        return _error("device_muted", "Unmute the Echo before recording", 409)
+    if live.oww_paused.is_set():
+        return _error(
+            "voice_turn_active",
+            "Wait for the current voice turn to finish before recording",
+            409,
+        )
+
+    body = await _json_body(request)
+    target = _require_str(body, "target_phrase")
+    try:
+        duration_ms = int(body.get("duration_ms", em_wake_recorder.DEFAULT_DURATION_MS))
+        status = live.wake_recorder.start(
+            target_phrase=target,
+            duration_ms=duration_ms,
+            device_label=row["label"] or device_id,
+            distance=body.get("distance", ""),
+            environment=body.get("environment", ""),
+            notes=body.get("notes", ""),
+            session_id=body.get("session_id", ""),
+        )
+    except ValueError as exc:
+        return _error("bad_request", str(exc), 400)
+    except RuntimeError as exc:
+        return _error("recording_in_progress", str(exc), 409)
+    return _ok({"recorder": status}, status=202)
+
+
+@auth.require_admin
+async def _post_wake_recorder_cancel(request: web.Request) -> web.Response:
+    device_id = request.match_info["id"]
+    row = await _device_row(device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    live = _devices.get(device_id)
+    cancelled = bool(live and hasattr(live, "wake_recorder")
+                     and live.wake_recorder.cancel())
+    return _ok({"cancelled": cancelled})
+
+
+@auth.require_auth
+async def _get_wake_sample_audio(request: web.Request) -> web.Response:
+    device_id = request.match_info["id"]
+    sample_id = request.match_info["sample"]
+    target = request.query.get("target", "").strip()
+    row = await _device_row(device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    if not target:
+        return _error("bad_request", "target query parameter is required", 400)
+    loop = asyncio.get_running_loop()
+    found = await loop.run_in_executor(
+        None, em_wake_recorder.find_sample, target, device_id, sample_id
+    )
+    if found is None:
+        return _error("sample_not_found", "No such wake-word sample", 404)
+    sample, path = found
+    target_slug = _slug(sample.get("target_phrase") or "wake-word")
+    label = _slug(row["label"] or device_id)
+    return web.FileResponse(
+        path,
+        headers={
+            "Content-Type": "audio/wav",
+            "Content-Disposition": (
+                f'attachment; filename="{target_slug}-{label}-{sample_id[:8]}.wav"'
+            ),
+            "Cache-Control": "private, max-age=60",
+        },
+    )
+
+
+@auth.require_admin
+async def _delete_wake_sample(request: web.Request) -> web.Response:
+    device_id = request.match_info["id"]
+    sample_id = request.match_info["sample"]
+    target = request.query.get("target", "").strip()
+    row = await _device_row(device_id)
+    if row is None:
+        return _error("device_not_found", f"No device: {device_id}", 404)
+    if not target:
+        return _error("bad_request", "target query parameter is required", 400)
+    loop = asyncio.get_running_loop()
+    removed = await loop.run_in_executor(
+        None, em_wake_recorder.delete_sample, target, device_id, sample_id
+    )
+    if not removed:
+        return _error("sample_not_found", "No such wake-word sample", 404)
+    return _ok({"deleted": sample_id})
 
 
 def _slug(text: str) -> str:
