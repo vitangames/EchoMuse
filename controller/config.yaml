@@ -3,7 +3,7 @@ name: "EchoMuse Recorder"
 # derives from the controller-v* tag (controller-v2.18.0 -> 2.18.0). Bump
 # both together: Supervisor pulls `image:version`, so a version with no
 # matching tag on GHCR fails to install.
-version: "2.20.2-recorder.6"
+version: "2.20.2-recorder.7"
 # Pull the published multi-arch image rather than building on the user's
 # machine. Without this Supervisor builds from this directory's Dockerfile,
 # which downloads a few hundred MB on whatever the user runs Home Assistant
@@ -61,7 +61,7 @@ options:
   server_ip: ""
   mdns_name: "echomuse"
   esphome_project_version: "2.0.0"
-  # Base for the per-device ESPHome satellite ports. Diffs per release
+  # Base for the per-device ESPHome satellite ports. Differs per release
   # channel so the two add-ons hand out disjoint ranges — see em_db's
   # ESPHOME_PORT_BASE and sync_channels.py, which rewrites this line.
   esphome_port_base: 16001
@@ -74,7 +74,7 @@ options:
   device_approval: "strict"
   debug: false
   # Path to a PEM CA certificate to trust, for a Home Assistant served
-  # # over HTTPS with a private CA. Put the file in Home Assistant's /ssl
+  # over HTTPS with a private CA. Put the file in Home Assistant's /ssl
   # folder and give the path as /ssl/<filename>.
   extra_ca_cert: ""
 schema:
