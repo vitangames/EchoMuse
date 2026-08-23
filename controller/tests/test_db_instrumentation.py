@@ -41,6 +41,14 @@ def test_turns_has_delivery_columns(fresh_db):
         assert c in cols, f"turns.{c} missing"
 
 
+def test_turns_has_detailed_assist_timing_columns(fresh_db):
+    """The Activity timeline must keep STT, intent and TTS separable."""
+    cols = _cols("turns")
+    for c in ("pipeline_start_ms", "stt_start_ms", "intent_start_ms",
+              "intent_end_ms", "tts_start_ms", "tts_route_ms", "tts_route"):
+        assert c in cols, f"turns.{c} missing"
+
+
 def test_device_metrics_has_link_columns(fresh_db):
     cols = _cols("device_metrics")
     for c in ("link_speed_last", "link_speed_min", "wifi_freq_last",
