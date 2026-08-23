@@ -13,7 +13,7 @@ def test_custom_ga_pulls_the_custom_prebuilt_image():
     config = yaml.safe_load((CONTROLLER / "config.yaml").read_text())
     assert config["image"] == "ghcr.io/vitangames/echomuse-controller"
     assert config["url"] == "https://github.com/vitangames/EchoMuse"
-    assert str(config["version"]).endswith("-recorder.1")
+    assert str(config["version"]).startswith("2.20.2-recorder.")
 
 
 def test_official_ea_channel_is_not_repointed_to_an_unpublished_custom_tag():
