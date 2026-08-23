@@ -331,19 +331,29 @@ function Slider({ label, sub, value, min, max, step = 1, unit = '', formatValue,
   );
 }
 
-function Toggle({ label, sub, value, onChange }) {
+function Toggle({ label, sub, value, onChange, disabled = false }) {
   // minWidth: 0 on the flex container and label lets long label/sub text
   // shrink and wrap instead of forcing the row (and the switch with it)
   // wider than the grid column — which pushed the switch past the edge of
   // the config dialog. flexShrink: 0 keeps the switch at full size.
+  //
+  // `disabled` is honoured in the HANDLER, not only in the styling — the
+  // capability rule ("shown disabled with the reason, never a control that
+  // silently does nothing") is a claim about what a click does, and a switch
+  // that greys itself while still writing is worse than one that does
+  // nothing: the stored setting then disagrees with what the control shows.
+  // Slider has always taken the same prop; Toggle did not take it at all, so
+  // every caller that wanted it had to fake it by neutering `value` and
+  // `onChange` at the call site.
   return (
     <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 20, minWidth: 0, gap: 10 }}>
       <div style={{ minWidth: 0, flex: 1 }}>
-        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: 'var(--text2)' }}>{label}</span>
+        <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 11, color: disabled ? 'var(--muted)' : 'var(--text2)' }}>{label}</span>
         {sub && <span style={{ fontFamily: "'DM Mono',monospace", fontSize: 10, color: 'var(--muted)', marginLeft: 8 }}>{sub}</span>}
       </div>
-      <div onClick={() => onChange(!value)} style={{
-        width: 36, height: 20, borderRadius: 10, cursor: 'pointer', position: 'relative', flexShrink: 0,
+      <div onClick={() => { if (!disabled) onChange(!value); }} style={{
+        width: 36, height: 20, borderRadius: 10, cursor: disabled ? 'default' : 'pointer',
+        position: 'relative', flexShrink: 0, opacity: disabled ? 0.45 : 1,
         background: value ? 'var(--accent)' : 'var(--muted)',
         border: value ? '1px solid var(--accent-deep)' : '1px solid var(--muted)',
         transition: 'background 0.15s',
@@ -678,6 +688,12 @@ function Shell({ deviceId, token, height = 320 }) {
     term.loadAddon(fit);
     term.open(containerRef.current);
     fit.fit();
+    // Take the caret straight away. Shell is mounted only while the Console
+    // tab is selected (see `tab === 'console'`), so this component existing
+    // IS the user asking for a terminal — there is nothing else on the tab
+    // that could reasonably want focus, and without it every visit starts
+    // with a click that does nothing except tell xterm you meant it.
+    term.focus();
 
     const sock = new WebSocket(ingressWebSocketUrl(`/api/devices/${deviceId}/shell?token=${token}`));
     sock.binaryType = 'arraybuffer';
@@ -5100,7 +5116,8 @@ const STAGE_MONO = "'DM Mono',monospace";
 // control sitting under a toggle that does not govern it would look fine and
 // be silently wrong.
 const CONFIG_SECTIONS = {
-  "playback": ["eqBands", "eqLoudness", "duckDb"],
+  "playback": ["eqBands", "eqLoudness", "duckDb", "limiterEnabled", "limiterThreshold", "limiterRelease", "bassGuardEnabled", "bassGuardDb"],
+  "tts_output": ["tts_output_media_player"],
   "wakeword": ["owwModel", "owwThreshold", "owwSpeexNs", "bargeInEnabled", "bargeInThreshold", "wakeArbitrationMs", "owwOnDevice"],
   "microphones": ["adcMicpga", "adcDigitalGain", "micGainDb", "beamformingEnabled", "beamAngle", "aecEnabled", "aecDelayMs", "aecTailMs", "nsAsr", "saveUtterances"],
   "ring": ["ledScene", "ledListenColor", "ledThinkColor", "meterAttack", "meterDecay", "meterFloor", "meterGamma", "meterRef", "meterCurve"],
@@ -5111,7 +5128,7 @@ const CONFIG_SECTIONS = {
 // Display labels for the section ids, and the reverse key -> section index
 // that lets a write be gated by the section owning the key it touches.
 const SECTION_LABELS = {
-  playback: 'Playback', wakeword: 'Wake word', microphones: 'Microphones',
+  playback: 'Playback', tts_output: 'TTS output', wakeword: 'Wake word', microphones: 'Microphones',
   ring: 'Ring', advanced: 'Advanced', bluetooth: 'Bluetooth',
 };
 const KEY_SECTION = {};
@@ -5338,6 +5355,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
 
   const [advMics, setAdvMics] = useState(false);
   const [advRing, setAdvRing] = useState(false);
+  const [advPlay, setAdvPlay] = useState(false);
 
   const inputStyle = disabled ? { opacity: 0.45, pointerEvents: 'none' } : {};
   const mono = "'DM Mono',monospace";
@@ -5378,6 +5396,25 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={inputStyle}>
               <Toggle label="Speech boost" sub="presence boost for voice" value={config.eqLoudness ?? false} onChange={v => set('eqLoudness', v)}/>
             </div>
+            {/* Speaker protection: ONE toggle for the bass guard, and the
+                limiter is not offered at all.
+
+                These were four controls until 2026-08-20, and none of them
+                can be judged by ear. The guard and the limiter cancel each
+                other's most obvious cue — guard on/off is 7.7dB of overall
+                level at a flat EQ and 0.2dB with the bands boosted, because
+                the limiter gives back exactly what the guard takes. The depth
+                moves the overall level 0.14dB across its ENTIRE range. And
+                the guard mostly removes content this driver cannot radiate,
+                so what remains is a second-order cleanliness gain.
+
+                Four controls whose individual effects range from "large" to
+                "nothing" depending on where the other three sit is not a
+                tuning surface; it is a way to conclude the feature is broken,
+                which is what happened. The limiter in particular must stay on
+                — it is what stops the EQ hard-clipping what it boosts (#231),
+                and that is not a preference. Every key still exists and is
+                settable through the API. */}
             <div style={inputStyle}>
               <Slider label="Duck depth" disabled={!mixCapable}
                 sub={mixCapable
@@ -5400,10 +5437,50 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             </div>
           </div>
         </div>
+        <StageAdvanced open={advPlay} onToggle={() => setAdvPlay(o => !o)} disabledStyle={inputStyle}>
+          <div style={inputStyle}>
+            <Toggle label="Speaker protection"
+              sub="keeps bass the driver can't deliver from muddying the midrange — leave on"
+              value={config.bassGuardEnabled ?? true} onChange={v => set('bassGuardEnabled', v)}/>
+          </div>
+          <div style={{ marginTop: 8, fontFamily: mono, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6 }}>
+            The speaker cannot reproduce the lowest frequencies, and feeding
+            them to it costs cone movement that muddies everything above.
+            Removing them is what keeps the midrange clean. The change is
+            subtle by design and there is no reason to turn it off.
+          </div>
+        </StageAdvanced>
       </Stage>
 
-      {/* 02 WAKE WORD */}
-      <Stage n="02" title="Wake word"
+      {/* 02 TTS OUTPUT */}
+      <Stage n="02" title="TTS output"
+        chips={<><ScopeChip tone="controller">Controller</ScopeChip><ScopeChip>Home Assistant</ScopeChip></>}
+        desc="Optional per-satellite response route. Leave empty to keep playing Assist replies through this Echo Dot; enter a media_player entity id to send only the ready TTS reply there instead."
+        scope={scopeEl('tts_output')} dim={secStyle('tts_output')}>
+        <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
+          <div>
+            <div style={{ fontFamily: mono, fontSize: 9, color: 'var(--text2)', letterSpacing: '0.08em', marginBottom: 5 }}>
+              TTS_OUTPUT_MEDIA_PLAYER
+            </div>
+            <input type="text"
+              value={config.tts_output_media_player ?? ''}
+              disabled={disabled}
+              onChange={e => set('tts_output_media_player', e.target.value)}
+              placeholder="media_player.living_room"
+              spellCheck={false}
+              style={{ width: '100%', boxSizing: 'border-box' }}/>
+          </div>
+          <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', lineHeight: 1.6 }}>
+            In Home Assistant, open this EchoMuse ESPHome integration and enable
+            “Allow the device to perform Home Assistant actions”. The add-on does
+            not request broad Home Assistant API access. Mic, STT and wake-word
+            audio stay on their existing path.
+          </div>
+        </div>
+      </Stage>
+
+      {/* 03 WAKE WORD */}
+      <Stage n="03" title="Wake word"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="openwakeword scores the continuous mic stream on the controller. Sensitivity sets the detection threshold — attempts that score close but miss are counted as near-misses (Status tab)."
         scope={scopeEl('wakeword')} dim={secStyle('wakeword')}>
@@ -5470,7 +5547,7 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
             <div style={{ marginTop: 16, ...inputStyle }}>
               <Toggle label="Speex denoise" sub="cleans audio before scoring — try in noisy rooms" value={config.owwSpeexNs ?? false} onChange={v => set('owwSpeexNs', v)}/>
               <Toggle label="Barge-in" sub="wake word interrupts playback — enable AEC first" value={config.bargeInEnabled ?? false} onChange={v => set('bargeInEnabled', v)}/>
-              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.05} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
+              <Slider label="Barge threshold" sub="wake confidence needed during playback — raise it if a response cuts itself short" value={config.bargeInThreshold ?? 0.25} min={0.05} max={0.9} step={0.05} onChange={v => set('bargeInThreshold', v)}/>
               <Slider label="Arbitration window" sub="ms that the first Echo to hear you silences the others — no added delay; 0 disables" value={config.wakeArbitrationMs ?? 700} min={0} max={2000} step={50} unit="ms" onChange={v => set('wakeArbitrationMs', v)}/>
               {/* Three modes, so a select rather than a toggle. Each option is
                   offered only when the device says it can do it — capability,
@@ -5508,8 +5585,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </div>
       </Stage>
 
-      {/* 03 MICROPHONES */}
-      <Stage n="03" title="Microphones"
+      {/* 04 MICROPHONES */}
+      <Stage n="04" title="Microphones"
         chips={<ScopeChip tone="device">Device</ScopeChip>}
         desc="Capture from the 7-mic array. Presets steer which perimeter mic is used during voice turns — wake-word listening always uses the centre mic. Gain here is the only gain in the wake path: it sets the level everything downstream hears."
         scope={scopeEl('microphones')} dim={secStyle('microphones')}>
@@ -5554,8 +5631,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </StageAdvanced>
       </Stage>
 
-      {/* 04 RING */}
-      <Stage n="04" title="Ring"
+      {/* 05 RING */}
+      <Stage n="05" title="Ring"
         chips={<ScopeChip tone="controller">Controller</ScopeChip>}
         desc="Colours for the LED ring during conversations — the solid listening ring and the thinking spinner. The red mute ring and cyan volume arc never change; red always means the mics are off."
         scope={scopeEl('ring')} dim={secStyle('ring')}>
@@ -5637,20 +5714,23 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </StageAdvanced>
       </Stage>
 
-      {/* 05 ADVANCED — button-turn internals: processing + speech gate */}
-      <Stage n="05" title="Advanced"
+      {/* 06 ADVANCED — button-turn internals: processing + speech gate */}
+      <Stage n="06" title="Advanced"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip>Button turns only</ScopeChip></>}
         desc="Everything here affects only bounded button-press turns — except the action button setting, which decides whether a tap starts one at all. Wake-word turns stream continuously — Home Assistant's VAD endpoints them, and the controller closes accidental wakes after 5s of silence relative to the room's measured noise floor — so none of these settings touch the wake path."
         scope={scopeEl('advanced')} dim={secStyle('advanced')}>
         {subHeader('Action button', true)}
         <div className="em-grid2" style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '0 24px', ...inputStyle }}>
-          {/* Offered only when the device says it can measure a hold. */}
-          <Toggle label="Tap sends an event"
+          {/* Offered only when the device says it can measure a hold. The
+              value still reads through holdCapable so an incapable device
+              shows the switch off rather than showing a stored true it
+              cannot honour. */}
+          <Toggle label="Tap sends an event" disabled={!holdCapable}
             sub={holdCapable
               ? "tap fires the HA action-button event instead of starting a turn — hold still fires 'long'; the button can no longer cancel a response. A tap is easy to trigger by accident and the button is unauthenticated — bind destructive automations to 'long' instead"
               : 'needs newer firmware on this Echo — it has no action-button event for a tap to fire'}
             value={holdCapable && (config.buttonSingleTapEvent ?? false)}
-            onChange={holdCapable ? (v => set('buttonSingleTapEvent', v)) : (() => {})}/>
+            onChange={v => set('buttonSingleTapEvent', v)}/>
           <Slider label="Multi-tap window" sub="0 = off. Coalesces quick taps into double/triple, at the cost of delaying every tap by this much. Needs 'Tap sends an event'" value={config.buttonMultiTapMs ?? 0} min={0} max={600} step={50} unit="ms" disabled={!(holdCapable && (config.buttonSingleTapEvent ?? false))} onChange={v => set('buttonMultiTapMs', v)}/>
         </div>
         {subHeader('Turn processing')}
@@ -5665,8 +5745,8 @@ function DeviceConfigForm({ config, onChange, disabled, sections, onScopeChange,
         </div>
       </Stage>
 
-      {/* 06 BLUETOOTH */}
-      <Stage n="06" title="Bluetooth"
+      {/* 07 BLUETOOTH */}
+      <Stage n="07" title="Bluetooth"
         chips={<><ScopeChip tone="device">Device</ScopeChip><ScopeChip tone="controller">Controller</ScopeChip></>}
         desc="Turns the device into a Home Assistant Bluetooth proxy: it passively listens for BLE advertisements (presence beacons, temperature sensors) and forwards them to HA as a separate ESPHome device — independent of the voice assistant. Enabling permanently switches the Dot's Bluetooth chip away from Android's stack (Bluetooth speaker pairing, never used by EchoMuse, stops being possible)."
         scope={scopeEl('bluetooth')} dim={secStyle('bluetooth')}>
@@ -6058,6 +6138,32 @@ function App() {
 
   // Restore token on mount
   useEffect(() => { if (token) API.token = token; }, []);
+
+  // Reconcile the cached role against the server's.
+  //
+  // `role` seeds from localStorage, written once at sign-in, and nothing used
+  // to re-read it — so a role that changed server-side never reached the UI.
+  // That is not an edge case: it is what every PATCH /api/users/{id}
+  // promotion looks like to the promoted person, who stays read-only until
+  // they happen to sign out. Under ingress there is deliberately no Sign out
+  // at all, so the stale value had nothing to clear it and correcting the
+  // database by hand still left the panel read-only (#235).
+  //
+  // The symptom is precise and confusing: the SERVER accepts the writes, so
+  // saving config works, while the UI hides every admin-only control. It
+  // reads as half-broken rather than as stale state.
+  //
+  // /api/auth/me is the authority and it is already there. A failure is
+  // deliberately ignored — the periodic loads below surface a dead session,
+  // and a transient blip must not silently demote a working dashboard.
+  useEffect(() => {
+    if (!token) return;
+    API.get('/api/auth/me').then(me => {
+      if (!me || !me.role || me.role === role) return;
+      setRole(me.role);
+      localStorage.setItem('em_role', me.role);
+    }).catch(() => {});
+  }, [token]);
 
   // Load initial data
   useEffect(() => {

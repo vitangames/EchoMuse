@@ -1148,3 +1148,566 @@ def test_role_changes_refuse_to_strand_the_install():
     assert "admin_count" in body, "must count admins before demoting one"
     assert "last_admin" in body, "must refuse to remove the final admin"
 
+
+
+def test_addon_options_are_wired_end_to_end():
+    """
+    An add-on option needs four separate things to work: a default in
+    `options`, a type in `schema`, a translation, and a line in em_start.py's
+    OPTION_ENV_VARS. Miss one and it fails a different way each time, none of
+    them loud:
+
+      - no `schema` entry — Supervisor rejects the whole options block
+      - no translation      — the raw key renders as the field label
+      - no OPTION_ENV_VARS  — the setting is accepted, displayed, stored, and
+                              then ignored; em_start warns to the add-on log
+                              and starts anyway, which is the right call for
+                              boot resilience and means nobody sees it
+
+    The reverse direction matters too: an OPTION_ENV_VARS entry with no
+    option is a mapping for a setting Supervisor will never send.
+
+    Added with the `debug` option (2026-08-16). DEBUG had no add-on option at
+    all, so controller debug logging — the first thing support asks for — was
+    reachable on the container and not on the add-on.
+    """
+    import yaml
+
+    config = yaml.safe_load((CONTROLLER / "config.yaml").read_text())
+    translations = yaml.safe_load(
+        (CONTROLLER / "translations/en.yaml").read_text())
+
+    options = set(config["options"])
+    schema = set(config["schema"])
+    translated = set(translations["configuration"])
+
+    start = (CONTROLLER / "em_start.py").read_text()
+    block = re.search(r"OPTION_ENV_VARS\s*=\s*\{(.*?)\}", start, re.S)
+    assert block, "em_start.py no longer defines OPTION_ENV_VARS"
+    mapped = set(re.findall(r'"(\w+)"\s*:', block.group(1)))
+
+    assert not options - schema, \
+        f"options with no schema entry: {sorted(options - schema)}"
+    assert not schema - options, \
+        f"schema entries with no default: {sorted(schema - options)}"
+    assert not options - translated, \
+        f"options with no translation: {sorted(options - translated)}"
+    assert not options - mapped, (
+        f"options not in em_start.py's OPTION_ENV_VARS: "
+        f"{sorted(options - mapped)} — Supervisor would accept and store "
+        f"these and the controller would never see them")
+    assert not mapped - options, (
+        f"OPTION_ENV_VARS entries with no add-on option: "
+        f"{sorted(mapped - options)}")
+
+
+def test_debug_env_var_is_not_truthy_for_zero():
+    """
+    em_start.py renders a false bool option as the STRING "0", and every
+    non-empty string is truthy in Python. So a bare
+    `if os.environ.get("DEBUG")` puts every add-on install at DEBUG level
+    with the toggle showing off — the failure being verbose logs nobody
+    asked for, on the deployment least able to rotate them.
+
+    Pinned rather than assumed because the original line read exactly that
+    way, and the same shape is the obvious thing to write for the next
+    bool env var.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert not re.search(r'if\s+os\.environ\.get\(\s*"DEBUG"\s*\)\s*else', src), (
+        "DEBUG is being read as a bare truthiness test — the string \"0\" "
+        "that em_start.py writes for a false option is truthy")
+
+    match = re.search(r'^DEBUG\s*=\s*(.+)$', src, re.M)
+    assert match, "em_controller.py no longer defines a DEBUG flag"
+    assert '"0"' in match.group(1) and '"1"' in match.group(1), (
+        "DEBUG must default to \"0\" and test for \"1\", the convention "
+        "REQUIRE_DEVICE_TLS already uses")
+def test_wake_word_phrase_is_sent_and_matches_what_we_advertise():
+    """
+    Home Assistant's voice satellite setup arms an interceptor for the next
+    wake word and reads `wake_word_phrase` off the pipeline start. On None it
+    raises AssistSatelliteError("No wake word phrase provided") and ends the
+    run in milliseconds — so every voice turn worked while the one flow that
+    asks a device to prove it heard a wake word could never complete, and the
+    only way past was Skip (confirmed on hardware 2026-08-16).
+
+    HA then matches that phrase against the STATE of its wake-word select
+    entity, whose options are the display names we advertise
+    (esphome/assist_satellite.py `ww_state.state == wake_word_phrase`). So the
+    phrase and the advertised name must come from ONE function or they drift
+    apart and HA silently matches neither.
+
+    Source-shape assertions: this suite does not import em_esphome, which
+    needs aiohttp and the protobufs.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+
+    start = re.search(r"api_pb2\.VoiceAssistantRequest\((.*?)\)\)", src, re.S)
+    assert start, "the pipeline-start VoiceAssistantRequest was not found"
+    assert "wake_word_phrase" in start.group(1), (
+        "VoiceAssistantRequest must carry wake_word_phrase — without it HA "
+        "refuses the run and the satellite setup dialog never advances")
+
+    advertised = re.search(r"api_pb2\.VoiceAssistantWakeWord\((.*?)\)", src, re.S)
+    assert advertised, "VoiceAssistantWakeWord advertisement not found"
+    assert "em_oww_models.display_name" in advertised.group(1), (
+        "the advertised wake_word must come from em_oww_models.display_name, "
+        "the same source as the phrase we send")
+
+    assert 'display_name(server.oww_model_id)' in src, (
+        "the phrase must be derived with display_name too — a second spelling "
+        "is how it drifts from what we advertised")
+
+
+def test_button_turns_claim_no_wake_word():
+    """
+    A button turn has no wake word, and saying otherwise tells HA something
+    untrue about how the turn started — it would also satisfy a setup-flow
+    interceptor with a wake word nobody spoke. aioesphomeapi maps "" back to
+    None, so an empty string is the protocol's way to say "none".
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+    gate = re.search(r'wake_word_phrase\s*=\s*\((.*?)else ""', src, re.S)
+    assert gate, "the wake_word_phrase gate was not found"
+    assert 'trigger_label.startswith("wakeword")' in gate.group(1), (
+        "the phrase must be gated on the trigger being a wake word, so button "
+        "turns send \"\"")
+
+
+def test_a_run_ha_never_started_ends_the_turn():
+    """
+    Home Assistant's satellite setup intercepts a wake word by emitting
+    RUN_END and returning, without ever starting a pipeline. The controller
+    held the microphone anyway until its own timers expired — measured at
+    20.0s (streaming hard cap) and 5.2s (no-speech window) — while HA had
+    re-armed for the next wake word 18ms after ending the first. That is why
+    the setup flow's second "say it again" step landed on a device still
+    listening for the first.
+
+    The discriminator is RUN_START, not timing. Measured on hardware, a
+    genuine run is RUN_START (2ms before STT_START) … RUN_END (last, after
+    TTS_END); an interception is RUN_END alone. So a RUN_END with no
+    RUN_START cannot be the premature/duplicate RUN_END the other branch
+    exists for, because that one arrives MID-turn and a mid-turn RUN_END
+    follows the RUN_START that opened it.
+
+    Also: the outcome is `pipeline_refused`, not `no_speech`. The audio was
+    captured and streamed into a run that had already closed, and the outcome
+    is persisted — so `no_speech` would put every HA-side refusal into the
+    activity stats as a silent user.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+
+    assert "VOICE_ASSISTANT_RUN_START" in src, (
+        "RUN_START must be handled — its absence is what identifies a "
+        "RUN_END that HA emitted without running a pipeline")
+    assert "_run_started" in src and "_ha_never_started" in src, \
+        "no state tracks whether HA ever started the run it just ended"
+    assert '"pipeline_refused"' in src, \
+        "an HA run that never started must not be recorded as no_speech"
+
+    handler = re.search(
+        r"VOICE_ASSISTANT_RUN_END:(.*?)elif event_type", src, re.S)
+    assert handler, "RUN_END handler not found"
+    body = handler.group(1)
+
+    assert "if not self._run_started:" in body, (
+        "RUN_END must check whether a RUN_START was ever seen before "
+        "treating itself as terminal")
+
+    # The premature/duplicate branch must stay gated on INTENT_END — acting
+    # on a mid-turn RUN_END would cut genuine turns short.
+    premature = body.split("if not self._run_started:")[1]
+    assert "self._intent_ended or self._turn_cancelled" in premature, (
+        "a RUN_END that DID follow a RUN_START must stay non-terminal until "
+        "INTENT_END — this is the guard against cutting genuine turns")
+
+
+def test_entity_names_do_not_repeat_the_device_label():
+    """
+    Home Assistant sets `_attr_has_entity_name = True` for every esphome
+    entity and composes "<device name> <entity name>" itself. Our device name
+    is already "<label> Voice Assistant", so putting the label in the entity
+    name too renders it twice:
+
+        'EA Test Device 01 Voice Assistant EA Test Device 01 Ambient Light'
+        'Lounge Voice Assistant Lounge'
+
+    Observed on every device and every entity (2026-08-16). em_ble_proxy had
+    it right all along with a bare "BLE advertisements", which is what makes
+    this a slip rather than a misunderstanding.
+
+    An empty name is HA's convention for the device's primary entity —
+    `self._attr_name = static_info.name or None` in esphome/entity.py — and
+    renders as the device name alone, so the media player is deliberately
+    "" rather than a label.
+    """
+    src = (CONTROLLER / "em_esphome.py").read_text()
+
+    block = re.search(r"ListEntitiesMediaPlayerResponse\((.*?)ListEntitiesDoneResponse",
+                      src, re.S)
+    assert block, "the ListEntities block was not found"
+    body = block.group(1)
+
+    assert "self.label" not in body, (
+        "an entity name must not include the device label — HA already "
+        "prefixes the device name, so it renders twice")
+    assert 'name=""' in body, \
+        "the media player should take the device's own name"
+
+
+def test_asset_sync_does_not_shadow_its_accumulator():
+    """
+    _sync_oww_assets keeps a `pushed` list of installed asset names. Assigning
+    the per-file transfer result to that same name shadowed the list on the
+    FIRST file, so the append at the end of the loop raised
+    AttributeError: 'TransferResult' object has no attribute 'append'
+    and on-device wake word assets could not be installed at all.
+
+    It reached a release because TransferResult is deliberately truthy-
+    compatible so existing `if not …` call sites keep working — which is
+    exactly why the one call site that treated the result as a list was the
+    only thing that broke, and nothing else complained.
+
+    Found on hardware 2026-08-16: a device reporting "classifier model not
+    installed" while the dashboard offered to send it and returned 500.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"async def _sync_oww_assets\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_sync_oww_assets not found"
+    body = fn.group(0)
+
+    assert "pushed = []" in body, "the accumulator is gone"
+    assert "pushed.append(" in body, "nothing accumulates installed names"
+    assert not re.search(r"pushed\s*=\s*await\s+_stream_file_to_device", body), (
+        "the transfer result must not be assigned to `pushed` — that shadows "
+        "the accumulator and the append raises AttributeError")
+
+
+def test_a_new_wake_word_is_installed_before_the_device_is_told_about_it():
+    """
+    A device cannot score a wake word whose classifier it does not have, and
+    under owwOnDevice=on the controller has stood down — so telling it to use
+    a model it lacks produced a device with NO wake word: nothing fired,
+    nothing warned, the dashboard reported it healthy (#191).
+
+    The first fix stood the device down to controller-side scoring while the
+    model installed. That works, and it silently overrides a setting the user
+    chose — a posture change they did not ask for and cannot see. Holding the
+    key back instead means the device keeps listening for its CURRENT wake
+    word, on-device, throughout, and simply stays there if the install fails.
+
+    The hold-back is invisible at the call site: the config push looks
+    ordinary, and the whole guard is that one key was swapped out first.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"async def _apply_live_config\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_apply_live_config not found"
+    body = fn.group(0)
+
+    hold = body.find("_hold_back_oww_model(live, effective)")
+    push = body.find('send_control({"type": "config"')
+    assert hold != -1, "the new model is no longer held back"
+    assert push != -1, "the config push is gone"
+    assert hold < push, (
+        "the model must be held back BEFORE the config is pushed, or the "
+        "device is told to use a model it does not have"
+    )
+    assert "_install_then_switch" in body, "nothing installs the pending model"
+
+
+def test_only_devices_that_score_locally_are_held_back():
+    """
+    With owwOnDevice=off the controller does the scoring and the file on the
+    device is irrelevant — holding the change back would delay it for no
+    reason. That is the common case and it stays instant.
+
+    Both the old and the new mode are consulted: enabling on-device scoring in
+    the same save that changes the wake word must not slip through on the
+    strength of the old mode being "off".
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"def _hold_back_oww_model\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_hold_back_oww_model not found"
+    body = fn.group(0)
+
+    assert "oww_shadow_capable" in body, (
+        "a device that cannot score locally must not be held back"
+    )
+    assert body.count("MODE_OFF") >= 2, (
+        "both the current and the incoming mode must be consulted"
+    )
+    assert 'effective.get("owwOnDevice"' in body, (
+        "the incoming mode is not read — a save that turns on-device scoring "
+        "on while changing the wake word would slip through"
+    )
+
+
+def test_a_failed_install_leaves_the_device_on_its_old_wake_word():
+    """
+    The failure direction that matters. Switching anyway is what produced the
+    deaf device; standing the device down instead overrides the user's choice.
+    Staying put means the device keeps answering, on a wake word it can hear.
+    """
+    src = (CONTROLLER / "em_api.py").read_text()
+    fn = re.search(r"async def _install_then_switch\(.*?\n(?=\nasync def |\ndef )",
+                   src, re.S)
+    assert fn, "_install_then_switch not found"
+    body = fn.group(0)
+
+    # The failure BRANCH itself, not the span up to the switch — that span
+    # contains other returns, which is how the first version of this test
+    # passed against a branch that fell straight through.
+    branch = re.search(r'\n    if not result\.get\("ok"\):\n(.*?)\n    (?=\S)',
+                       body, re.S)
+    assert branch, "the failure branch is gone"
+    assert re.search(r"^        return\s*$", branch.group(1), re.M), (
+        "a failed install must return, not fall through into switching the "
+        "device onto a model it does not have"
+    )
+
+
+
+def test_both_effective_mode_call_sites_pass_readiness():
+    """
+    Config push and device registration both resolve the mode. A guard applied
+    to one and not the other is a device that is safe until it reconnects —
+    the same shape as the v7 stats-relay miss.
+    """
+    for name in ("em_api.py", "em_controller.py"):
+        src = (CONTROLLER / name).read_text()
+        # Non-greedy matching to the first ")" is wrong here: the argument
+        # itself contains one (`effective.get("owwOnDevice")`). Take a fixed
+        # window after each call instead — the call sites are three lines.
+        for m in re.finditer(r"effective_mode\(", src):
+            call = src[m.end():m.end() + 200]
+            assert "model_ready" in call or "oww_model_ready" in call, (
+                f"{name}: an effective_mode call omits model readiness — "
+                f"{call.splitlines()[0]!r}"
+            )
+
+
+def test_an_announcement_clears_the_cancel_flag_before_playing():
+    """
+    cancel_event is set by a cancel — a button press during a turn, a mute —
+    and was ONLY ever cleared when the next VOICE TURN started. Nothing in the
+    announcement path cleared it, and _run_post_turn_playback checks it, so a
+    cancelled turn silently killed every subsequent announcement until a turn
+    happened to run.
+
+    Measured on Test Device 01, 2026-08-17: a turn cancelled at 12:02:32 left
+    seven announcements over the next three minutes logging "Cancelled during
+    playback" and playing nothing. Adding a second device made it look like a
+    routing bug — that device played fine, because its own flag was clear.
+
+    An announcement is a new action; nothing that set the flag earlier has any
+    claim on it.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = re.search(r"async def _standalone_play\(.*?\n(?=        async def )",
+                   src, re.S)
+    assert fn, "_standalone_play not found"
+    body = fn.group(0)
+
+    # The literal calls, not the prose: this function's comments name
+    # _run_post_turn_playback before either call happens.
+    clear = body.find("_d.cancel_event.clear()")
+    play = body.find("await _run_post_turn_playback(")
+    assert clear != -1, (
+        "an announcement no longer clears cancel_event — a cancelled turn "
+        "will silently kill every announcement that follows it"
+    )
+    assert clear < play, "the flag must be cleared BEFORE the audio is played"
+
+
+def test_an_announcement_reports_whether_it_actually_played():
+    """
+    The reply to HA carries one fact — did the user hear it. Something that
+    cancels mid-playback means they did not, and `return True` regardless
+    would make the reply decorative.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    fn = re.search(r"async def _standalone_play\(.*?\n(?=        async def )",
+                   src, re.S)
+    body = fn.group(0)
+    assert "-> bool" in body, "_standalone_play must report whether it played"
+    assert re.search(r"return not .*cancel_event\.is_set\(\)", body), (
+        "the return value must reflect whether playback was cancelled"
+    )
+
+
+def test_the_speaking_flag_and_its_dashboard_push_cannot_drift():
+    """
+    The dashboard renders `speaking` above `thinking` and _push_device_state
+    has always carried it — but nothing pushed the transition. The only pushes
+    were at listening, thinking and turn end, so a turn read
+    listening -> thinking -> idle and never showed Speaking at all. It appeared
+    only when the dashboard's 5s poll of /api/devices happened to land
+    mid-playback, which for a ~2s response it usually did not.
+
+    Setting the flag and telling anyone about it are now one operation, so a
+    third streaming path cannot reintroduce the gap by doing only the first.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S)
+    assert setter, "_set_speaking not found"
+    assert "_push_device_state(self)" in setter.group(0), (
+        "the setter must push — that is the whole reason it exists"
+    )
+
+    # Every other write is a bug. __init__'s default and the setter's own
+    # assignment are the two legitimate ones.
+    writes = re.findall(r"self\.speaking\s*=\s*(?!=)", src)
+    assert len(writes) == 2, (
+        f"expected 2 assignments to self.speaking (the __init__ default and "
+        f"the setter), found {len(writes)} — a streaming path is setting the "
+        f"flag without pushing it"
+    )
+
+
+def test_speaking_clears_on_device_confirmation_not_on_the_socket_write():
+    """
+    The stream task returns when the last byte reaches the socket, which
+    completes near-instantly however slow the link is — the device still has
+    its whole buffer to play. Clearing the flag there dropped the tile out of
+    Speaking seconds early, and because `thinking` was still set it fell BACK
+    to Thinking mid-response before finally going idle.
+
+    Exactly the mistake the LED ring made until 2026-07-24, in the same file.
+    The playback functions wait on the device's playback_stats; they are the
+    only things that know the speaker has stopped.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+
+    for fn_name in ("stream_speaker", "stream_speaker_chunks"):
+        fn = re.search(rf"async def {fn_name}\(.*?\n(?=    async def |    def )",
+                       src, re.S)
+        assert fn, f"{fn_name} not found"
+        assert "_set_speaking(False)" not in fn.group(0), (
+            f"{fn_name} clears speaking when the socket write finishes, not "
+            f"when the audio does"
+        )
+
+    for fn_name in ("_run_post_turn_playback", "_run_streaming_post_turn_playback"):
+        fn = re.search(rf"async def {fn_name}\(.*?\n(?=\nasync def |\ndef )",
+                       src, re.S)
+        assert fn, f"{fn_name} not found"
+        assert "_set_speaking(False)" in fn.group(0), (
+            f"{fn_name} waits for the device's playback_stats and must be what "
+            f"clears speaking"
+        )
+
+
+def test_speaking_and_thinking_are_mutually_exclusive():
+    """
+    Both flags reach the dashboard and `speaking` outranks `thinking`, so a
+    stale `thinking` is invisible until speaking clears — and then the tile
+    reads as if the device started thinking again mid-response.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S).group(0)
+    assert "self.thinking = False" in setter, (
+        "starting to speak must clear thinking, or the tile falls back to "
+        "Thinking when speaking ends"
+    )
+
+
+def test_the_speaking_push_cannot_fail_a_speaker_stream():
+    """
+    One caller is stream_speaker's finally, which is also reached when
+    barge-in cancels the task mid-send. A push that cannot complete there must
+    not take the stream down with it — turn end pushes the same state moments
+    later. The flag assignment is synchronous and happens either way.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    setter = re.search(r"async def _set_speaking\(.*?\n(?=    async def |    def )",
+                       src, re.S).group(0)
+    assign = setter.find("self.speaking = value")
+    push = setter.find("_push_device_state(self)")
+    assert assign < push, "the flag must be set before the push is attempted"
+    assert "except BaseException" in setter, (
+        "a bare `except Exception` does not catch the CancelledError this sees "
+        "during barge-in"
+    )
+
+
+# ── The wake listener must not be able to die quietly ─────────────────────────
+#
+# Source-shape tests, because the suite cannot import em_controller — which is
+# precisely why this had no coverage. On 2026-08-20 a device went deaf with no
+# error line and stayed that way until the add-on was restarted: the listener
+# is started with create_task and catches only CancelledError, so any other
+# exception ends it, and the connection handler holding a reference means
+# asyncio never even logs "Task exception was never retrieved". The device
+# meanwhile scores wake words and reports them into a dead loop, so it looks
+# healthy from every side.
+
+def test_the_wake_listener_is_started_through_its_supervisor():
+    """
+    A bare create_task(wake_word_listener(...)) is the bug. The whole guard is
+    that the call site goes through the supervisor, and nothing else enforces
+    that.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    # The supervisor's OWN create_task is the one legitimate use, so check
+    # everywhere else. Splitting on the def keeps this honest if the helper
+    # moves.
+    start = src.index("def _supervise_wake_listener")
+    end = src.index("async def wake_word_listener")
+    outside = src[:start] + src[end:]
+    assert "create_task(wake_word_listener(" not in outside, (
+        "wake_word_listener started with a bare create_task outside its "
+        "supervisor — an exception would end it silently and nothing would "
+        "restart it. Use _supervise_wake_listener()."
+    )
+    assert "_supervise_wake_listener(device)" in outside
+
+
+def test_the_supervisor_attaches_a_done_callback():
+    """Without one the task ends and no code ever learns that it did."""
+    src = (CONTROLLER / "em_controller.py").read_text()
+    body = src[src.index("def _supervise_wake_listener"):]
+    body = body[:body.index("async def wake_word_listener")]
+    assert "add_done_callback" in body
+    # A restart that ignores cancellation would fight ordinary teardown.
+    assert "cancelled()" in body
+    # It must say so — silent recovery hides a recurring fault.
+    assert "log.error" in body
+
+
+def test_teardown_cancels_the_live_listener_not_a_stale_handle():
+    """
+    A supervised restart replaces the task object, so cancelling the variable
+    captured at connect time would leave the live listener running against a
+    closed connection.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert "(device.oww_task or oww_task).cancel()" in src
+
+
+def test_a_stuck_pause_can_be_recovered():
+    """
+    The other silent-deafness path. While oww_paused is set the wake loop
+    routes every frame away and the no-frames watchdog stands down, so a flag
+    that is never cleared is deafness with nothing to end it.
+
+    Recovery is gated on voice_lock being free as well as time, because a long
+    turn is legitimate — the spinner TTL alone runs to 135s — and only the
+    combination is impossible.
+    """
+    src = (CONTROLLER / "em_controller.py").read_text()
+    assert "OWW_PAUSE_STUCK_S" in src
+    assert "oww_paused_since" in src
+    stuck = src[src.index("oww_paused stuck for") - 2000:
+                src.index("oww_paused stuck for") + 500]
+    assert "voice_lock.locked()" in stuck, (
+        "the stuck-pause recovery must check that no turn holds the lock — "
+        "time alone would cut a long but healthy turn"
+    )

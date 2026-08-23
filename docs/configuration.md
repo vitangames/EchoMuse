@@ -22,7 +22,7 @@ settings and froze them against fleet changes permanently.
 
 A section showing *Fleet* is displayed read-only rather than hidden, so you
 can always see what it is inheriting. The banner at the top of the tab
-summarises — `Fleet`, or `Local override (2 of 6)` with the sections named —
+summarises — `Fleet`, or `Local override (2 of 7)` with the sections named —
 and **Revert all to fleet** puts everything back.
 
 Flipping a section back to *Fleet* **discards** the values it was holding.
@@ -33,8 +33,8 @@ Changes apply **immediately** — no restarts, no rebuilds. The Config tab
 opens with the device's **network (WiFi)** settings at the top — always
 per-device, never inherited from the fleet — followed by the
 fleet-inheritable sections, in order of how often you'll realistically touch
-them: **Playback**, **Wake word**, **Microphones**, **Ring**, **Advanced**,
-**Bluetooth**.
+them: **Playback**, **TTS output**, **Wake word**, **Microphones**, **Ring**,
+**Advanced**, **Bluetooth**.
 
 The **CPU** meter shows the core count beside the percentage — "27% · 2/4
 cores". The Dot has four CPU cores and parks the ones it isn't using, and the
@@ -68,6 +68,19 @@ kept for 180 days and available via the API
 
 How responses sound.
 
+**Two things to know before you tune anything here.**
+
+**Changes take about four seconds to be heard.** Audio is sent to the device
+several seconds ahead of when you hear it, so what is playing right now was
+processed before you moved the control. Wait five seconds before judging, and
+do not flip a setting back and forth quickly — you will be listening to the
+old audio and conclude nothing happened.
+
+**Change the settings on the device you are listening to.** If a device has
+its own Playback settings (the Fleet/Device switch on that section), editing
+the fleet defaults will not affect it. The save succeeds either way, so the
+symptom is a control that appears to do nothing at all.
+
 ### Equalizer (8 faders + presets)
 Shapes the tone of the voice responses, like the EQ on a stereo. The Dot's
 little speaker is boomy and dull by default.
@@ -81,6 +94,46 @@ little speaker is boomy and dull by default.
 ### Speech boost
 An extra presence bump for spoken responses. Try it if responses sound
 muffled from across the room.
+
+### Speaker protection
+Keeps bass the driver cannot deliver from muddying everything above it. Leave
+it on.
+
+It sounds backwards, and it is the right answer for a speaker this small.
+Frequencies below about 115Hz still move the cone even though you cannot hear
+them, and that movement smears the midrange — which is what people usually
+describe as thin, boxy or "tin-can". Removing them makes the middle clearer,
+and on loud material slightly *louder*, because the limiter no longer has to
+hold everything down to contain bass peaks you were never going to hear.
+
+Quiet passages keep their low end. Only loud content is affected, which is why
+it is a guard rather than a filter.
+
+This one switch covers two stages: the bass guard described above, and a
+limiter that stops the equalizer distorting what it boosts. Turning any EQ
+band up can push the audio past the maximum the hardware can represent, and
+without a limiter that gets clipped — measured at nearly 5% of samples on an
+ordinary response with a modest bass boost, audible as harshness or crackle,
+and it only ever happened to people who touched the EQ to improve their sound.
+
+**It used to be five controls and now it is one, deliberately.** None of the
+five could be judged by ear. The two stages cancel out each other's most
+obvious effect — at a flat EQ, switching the guard on is a 7.7dB change in
+overall level, and with every band at +12dB it is 0.2dB, because the limiter
+simply gives back what the guard takes. The depth slider moved the overall
+level by 0.14dB across its entire range. Controls whose effect ranges from
+"large" to "nothing" depending on where the others sit are not a tuning
+surface; they are a way to conclude the feature is broken, which is what kept
+happening.
+
+The individual values still exist and still apply — if you had tuned the
+ceiling, release or depth, your settings are unchanged. They are reachable
+through the API for anyone who wants them, just not on the dashboard.
+
+The crossover frequency and the shape of the curve come from measurements of
+Amazon's own firmware on this same speaker, so they are not guesses. Our
+default depth is gentler than Amazon's, because theirs sits in front of an
+equalizer curve we have not yet measured — see issue #247.
 
 ### Duck depth
 How far music drops while the assistant is talking over it. Music **keeps
@@ -121,13 +174,65 @@ It is also never inherited from the fleet, whatever the section's Fleet /
 Device switch says — otherwise a device would come back at another room's
 volume.
 
+**The top of the range changed in 2.20.0.** EchoMuse used to drive the
+codec's digital volume past the point where it can only clip — measured at
+65% distortion three button presses above the midpoint, and 89% at the
+maximum, with the output no longer getting any louder. Stock Alexa never
+touches that control, which is why EchoMuse sounded worse than stock when
+turned up. The range now stops at the codec's unity gain, so the loudest
+setting is quieter than it was and everything below it is cleaner.
+
+The percentage Home Assistant shows also moved: a device at the same
+physical level reads a higher number than before, because the scale no
+longer includes a stretch that only distorted. Nothing changed about how
+loud it actually is. If you have an automation with a volume threshold in
+it, check that threshold.
+
+The physical buttons step about 4dB per press across the audible range,
+rather than spending presses near the bottom of a scale where nothing is
+audible — silencing the device is the mute button's job. The cyan ring
+spans that same range, so a press always moves it.
+
 Mute is remembered too, but by the device itself: a muted Dot stays muted
 through reboots, power cuts, and firmware updates — red ring and all —
 whether or not the controller is reachable.
 
 ---
 
-## 02 — Wake word
+## 02 — TTS output
+
+Where this satellite's Assist replies play. Leave
+`tts_output_media_player` empty (the default) and nothing changes: EchoMuse
+fetches, decodes, equalizes and streams the response through the Echo Dot's
+built-in speaker.
+
+Set it to one Home Assistant entity id, for example
+`media_player.living_room`, and EchoMuse sends the ready TTS URL to that
+player with `media_player.play_media` and `announce: true`. It does **not**
+also play through the Dot. Announcement-capable players temporarily interrupt
+their current media and resume it afterward; other players simply play the
+reply, subject to what that integration supports.
+
+This uses the satellite's existing authenticated ESPHome connection. It does
+not grant the add-on broad Home Assistant API access. Home Assistant disables
+device-initiated actions by default, so open this EchoMuse ESPHome integration
+in **Settings → Devices & services**, choose **Configure**, and enable
+**Allow the device to perform Home Assistant actions**.
+
+The redirect is downstream of Assist: continuous mic audio, wake-word scoring,
+VAD, STT and intent handling all keep their existing queues and timing. The
+external player must be able to reach the Home Assistant TTS URL. Also, its
+sound is ordinary room audio rather than the Echo Dot's own speaker reference,
+so the Dot's AEC cannot subtract it; that mainly matters if you expect barge-in
+while the external reply is still playing.
+
+The setting has its own scope section, so one satellite can target a room
+speaker without forking its EQ, microphones, wake word or ring settings from
+the fleet.
+
+---
+
+## 03 — Wake word
 
 How the device decides you said the magic word. By default this work happens
 on the controller, not the Dot — the Dot just streams audio to it. The Dot
@@ -145,6 +250,39 @@ use the **+ Custom model** tile to upload the `.onnx` — it's stored in the
 controller's data volume, appears as a tile next to the stock words, and
 takes effect immediately on selection. The `×` on an unselected custom tile
 deletes it.
+
+**If the device does its own wake word detection** (see *On-device wake
+word*), the model has to be copied onto it before it can listen for the new
+word. That happens automatically when you select it, and the device carries on
+answering to its **current** wake word until the new one has arrived — usually
+a few seconds. If the copy fails, the device stays on the word it already has
+and the device log says why. It is never left listening for a word it does not
+have.
+
+**Changing the wake word briefly reconnects the device in Home Assistant.**
+Home Assistant only reads a satellite's wake word configuration when it
+connects, so the controller drops and remakes that connection to make the new
+name show up. It takes a few milliseconds, but during it **every entity for
+that device goes unavailable and comes straight back** — the voice assistant,
+the media player, the action button, the ambient light sensor.
+
+That matters if you have an automation using a **state trigger** on any of
+them: coming back online is a state change, and the automation will fire. The
+action button's event entity is the one people hit, because a returning event
+entity restores its last event and looks exactly like the button being pressed
+again. Exclude the transition:
+
+```yaml
+trigger:
+  - platform: state
+    entity_id: event.your_device_action_button
+    not_from:
+      - unavailable
+      - unknown
+```
+
+Nothing is wrong with the device when this happens, and it only happens when
+you change the wake word.
 
 ### Arbitration window
 With more than one Echo, saying the wake word in earshot of two of them
@@ -178,20 +316,41 @@ near-misses climbing, move one step toward Eager. If it wakes up when nobody
 spoke, move toward Precise.
 
 ### Barge-in
-Lets the wake word **interrupt the assistant mid-turn** — say "Hey
-Rhasspy, stop" while it's reading you a paragraph (or still thinking
-about your last question) and it cuts off and listens. Off by default. **Turn on Echo cancel (AEC) first**: barge-in
-works by leaving the microphones live while the device speaks, and AEC is
-what stops it hearing itself. The **barge threshold** is the wake
-confidence required during playback — and counter-intuitively it should be
-much *lower* than the normal wake threshold (≈0.10 works well): the
-speaker is far louder at the microphones than you are, so your voice
-scores lower over playback than in a quiet room, while the device's own
-(echo-cancelled) voice barely scores at all (0.002–0.003 measured since
-v2.7.8). **0.05 is a good default** — you shouldn't need to raise your
-voice much. Raise it if responses ever cut themselves off. (During the
-silent *thinking* pause the normal wake sensitivity applies instead —
-nothing is playing, so the low barge threshold isn't needed there.)
+Lets the wake word **interrupt the assistant mid-turn** — say the wake word
+while it is reading you a paragraph (or still thinking about your last
+question) and it stops and listens. **Turn on Echo cancel (AEC) first**:
+barge-in works by leaving the microphones live while the device speaks, and
+AEC is what stops it hearing itself.
+
+The **barge threshold** is the wake confidence required during playback, and
+counter-intuitively it sits *lower* than the normal wake threshold. The
+speaker is far louder at the microphones than you are, so your voice scores
+lower over playback than it would in a quiet room — around 0.3 to 0.5
+measured, against 0.5 for an ordinary wake.
+
+**The default is 0.25, raised from 0.05.** The old value was chosen against
+short replies and it did not survive long ones: asking for a story, the
+assistant's own narration scored up to 0.18 and interrupted itself
+mid-sentence. Continuous speech simply offers more chances to briefly sound
+like a wake word. Two consecutive detections are now required as well, which
+is what makes a single stray frame harmless.
+
+If a response ever cuts itself off, raise this. If interrupting stops working,
+lower it — but check whether AEC is on first, since that is the more common
+cause.
+
+(During the silent *thinking* pause the normal wake sensitivity applies
+instead — nothing is playing, so the low threshold is not needed there.)
+
+**What happens after you interrupt.** The device stops talking and listens
+straight away — say the wake word and your new command in one breath and it
+hears both, without waiting for a second prompt. This only started working
+properly in 2.20.1: before that the interrupt cut the response off but the
+command that followed was never picked up, so you had to wait and ask again.
+
+**Interrupting cannot be taken back.** If you say the wake word and then stay
+quiet, the original answer is gone rather than resumed — Home Assistant has no
+way to restart a reply it has already abandoned. The turn just ends quietly.
 
 ### Speex denoise
 Runs a noise cleaner on the audio *only for wake-word scoring* (your actual
@@ -213,16 +372,30 @@ Who decides you said the wake word. Three settings:
   its word.
 
 **Why you might want "On device".** The wake decision stops crossing your
-network. On a marginal link that is the difference between a Dot that
-responds instantly and one that lags unpredictably, and it keeps working
-through a controller restart. It does *not* reduce network traffic — the
-audio still streams, because the controller runs the rest of the turn.
+network, so it is not delayed by a bad moment on the link. On a marginal
+connection that is the difference between a Dot that responds promptly and
+one that lags unpredictably.
 
-The controller keeps listening alongside it, which is deliberate: it costs
-nothing extra (it was already scoring), it keeps the comparison in
-**Activity** running so you can see whether the two agree, and it leaves
-barge-in — interrupting a response by speaking over it — working exactly as
-before.
+Be clear about what it does **not** do:
+
+- **It does not reduce network traffic.** The audio still streams
+  continuously, because the controller runs the rest of the turn.
+- **It does not keep working without the controller.** The wake word is only
+  the first step; the turn itself needs the controller for Home Assistant,
+  the microphone stream and the spoken reply. A wake detected while the
+  controller is down lights the ring and goes nowhere.
+
+The controller keeps listening alongside it, which keeps the comparison in
+**Activity** running so you can see whether the two agree. That costs nothing
+*extra* — it is the same work the controller was already doing in
+**Controller** mode — but it is work that is no longer strictly needed once
+you trust the device, and on a busy Home Assistant machine you may prefer not
+to pay for it. **Both (compare)** is the mode built for measuring; consider
+dropping back to it when you want the numbers rather than leaving them
+running forever.
+
+Barge-in — interrupting a response by speaking over it — is scored by the
+controller in every mode and is unaffected by this setting.
 
 Each voice turn's row in **Activity** shows both scores side by side, and
 the per-device activity API returns an agreement summary (how often they
@@ -256,7 +429,7 @@ Three things to know before leaving Controller:
 
 ---
 
-## 03 — Microphones
+## 04 — Microphones
 
 How your voice gets captured. These settings were tuned carefully — the
 presets are the only part most people should touch.
@@ -350,7 +523,7 @@ recording has aged past the last 10 and the turn history has outlived it.
 
 ---
 
-## 04 — Ring
+## 05 — Ring
 
 The colours the LED ring uses during conversations. Scenes apply
 instantly and can differ per device. On current firmware (v2.9+) the
@@ -412,7 +585,7 @@ These are taste settings, which is exactly why they're adjustable here
 rather than baked into firmware. The defaults are tuned for speech; if the
 ring looks too static, raise **Decay** and **Gamma** first.
 
-## 05 — Advanced
+## 06 — Advanced
 
 Everything in this section affects **only button-press conversations**
 (tapping the action button to talk without a wake word — a *hold* is a
@@ -481,7 +654,7 @@ the silence gate.
 
 ---
 
-## 06 — Bluetooth
+## 07 — Bluetooth
 
 **Bluetooth proxy** — turns the Dot into a Home Assistant Bluetooth proxy.
 The device passively listens for Bluetooth Low Energy advertisements
@@ -538,6 +711,7 @@ These are set once, on the server, and need a controller restart to change:
 | `DEVICE_APPROVAL` | `strict` (you approve every new device — recommended) or `auto`. |
 | `SERVER_TLS_PORT` | Encrypted device link (wss) port — default 8770, `0` disables. Devices switch to it automatically once they hold pushed credentials (wizard install, or the **Secure link** button on the device Status tab). |
 | `REQUIRE_DEVICE_TLS` | Set to `1` **only after every device shows "wss (TLS)"** on its Status tab — from then on the controller rejects unencrypted or tokenless device connections. |
+| `EM_EXTRA_CA_CERT` | Path to a PEM CA certificate to trust — only needed if Home Assistant is served over HTTPS with your own internal certificate authority. See below. |
 
 See `.env.example` for the complete list with comments.
 
@@ -552,6 +726,48 @@ link** button on its Status tab. A device with credentials connects
 encrypted from its next reconnect; the Status tab's **Link** row shows
 which mode each device is using. Once the whole fleet shows `wss (TLS)`,
 set `REQUIRE_DEVICE_TLS=1` to lock out unencrypted connections entirely.
+
+### Home Assistant behind a private certificate authority
+
+If Home Assistant is served over HTTPS with a certificate from your own
+internal CA, EchoMuse cannot fetch the spoken response and **every turn ends
+silently** — the controller starts normally, the Echo wakes, and no audio
+arrives. Nothing on screen explains it; the failure is a certificate
+verification error in the log.
+
+**Try this first, because it needs no certificate.** If Home Assistant itself
+still listens on plain HTTP and something in front of it (a reverse proxy,
+Nginx Proxy Manager, Cloudflare) handles TLS, set Home Assistant's **internal
+URL** to `http://<its-address>:8123`. Home Assistant builds the audio URL from
+that setting, so it becomes a plain local fetch and the problem disappears.
+EchoMuse is on your own network and the hop is local, so nothing is lost.
+
+**If Home Assistant itself is configured with `ssl_certificate`**, give
+EchoMuse the CA:
+
+- **Add-on** — put the CA certificate (PEM format) in Home Assistant's `ssl`
+  folder, then set the **Private CA certificate** option to
+  `/ssl/<filename>`. The add-on reads that folder read-only.
+- **Container** — mount the certificate and set `EM_EXTRA_CA_CERT` to its path
+  *inside* the container:
+
+  ```yaml
+  volumes:
+    - /path/to/internal-ca.crt:/certs/internal-ca.crt:ro
+  environment:
+    - EM_EXTRA_CA_CERT=/certs/internal-ca.crt
+  ```
+
+It must be a **PEM** file — the `-----BEGIN CERTIFICATE-----` kind. If yours is
+DER, convert it first:
+
+```bash
+openssl x509 -inform der -in ca.der -out ca.crt
+```
+
+If the file is missing, unreadable or not PEM, the controller **refuses to
+start and says which**, rather than starting and failing on every voice turn
+afterwards with an error nothing connects back to this setting.
 
 ## What leaves your network
 

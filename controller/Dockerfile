@@ -2,7 +2,7 @@ FROM python:3.12-slim
 # Links the GHCR package page back to the repo (and lets the package inherit
 # the repo's public visibility once connected).
 LABEL org.opencontainers.image.source="https://github.com/vitangames/EchoMuse" \
-      org.opencontainers.image.description="EchoMuse 2.19 controller with a passive real wake-word recorder"
+      org.opencontainers.image.description="EchoMuse 2.20.2 controller with wake-word recorder and optional Home Assistant TTS output"
 WORKDIR /app
 # Install curl for vendoring JS dependencies
 RUN apt-get update && apt-get install -y --no-install-recommends curl ffmpeg && rm -rf /var/lib/apt/lists/*
@@ -61,9 +61,12 @@ COPY em_api.py .
 COPY em_db.py .
 COPY em_auth.py .
 COPY em_eq.py .
+COPY em_limiter.py .
+COPY em_mbc.py .
 COPY em_scenes.py .
 COPY em_support.py .
 COPY em_shadow.py .
+COPY em_barge.py .
 COPY em_ns.py .
 COPY em_pki.py .
 COPY em_hostip.py .
@@ -73,6 +76,7 @@ COPY em_esphome.py .
 COPY em_ble_proxy.py .
 COPY em_oww_assets.py  ./
 COPY em_oww_models.py .
+COPY em_oww_warmup.py .
 COPY em_arbiter.py .
 COPY em_button.py .
 COPY em_tap_burst.py .
@@ -80,7 +84,12 @@ COPY em_player.py .
 COPY em_config_sections.py .
 COPY em_recordings.py .
 COPY em_wake_recorder.py .
+COPY em_tts_output.py .
 COPY em_turnclock.py .
+COPY em_firmware.py .
+COPY em_announce.py .
+COPY em_runbarrier.py .
+COPY em_volume.py .
 COPY version.py .
 # ESPHome native API subpackage (frame protocol, message registry, vendored protobuf)
 COPY esphome/ ./esphome/
@@ -119,6 +128,7 @@ RUN EARCH="$(dpkg --print-architecture)" && case "$EARCH" in amd64) EPKG=linux-x
 # Database persisted via volume mount
 # docker run -v ~/EchoMuse/controller/data:/app/data ...
 # Set DB_PATH=/app/data/echomuse.db in environment
+COPY em_cacerts.py .
 COPY em_start.py .
 # em_start.py bridges /data/options.json (Home Assistant add-on config) into
 # the env vars em_controller.py already reads, then execs into it — a no-op

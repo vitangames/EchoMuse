@@ -107,6 +107,35 @@ def test_triggering_is_a_separate_capability_from_scoring():
         "the dashboard must gate the 'On device' option on the capability"
 
 
+def test_the_toggle_control_actually_honours_disabled():
+    """
+    "Disabled WITH the reason, never a control that silently does nothing" is
+    the rule every capability gate above is enforced by — and Toggle did not
+    accept a `disabled` prop at all; only Slider did. So the rule could not be
+    expressed on a switch, and the one call site that needed it ("Tap sends an
+    event", gated on button_hold) had to fake it by neutering `value` and
+    `onChange` by hand — which leaves the control looking live: full-contrast
+    label, pointer cursor, a switch that animates when clicked and stores
+    nothing. Any caller passing `disabled` in good faith got worse: a switch
+    greyed with its reason that WROTE THE OPPOSITE VALUE on click, so the
+    stored setting silently disagreed with what the control showed.
+
+    Asserted against the component rather than the call sites, because the
+    call sites already looked correct while the bug was live.
+    """
+    jsx = (ROOT / "controller" / "static" / "dashboard.jsx").read_text()
+    m = re.search(r'function Toggle\(\{(.*?)\}\)', jsx, re.S)
+    assert m, "dashboard.jsx must still define a Toggle component"
+    assert "disabled" in m.group(1), \
+        "Toggle must accept a `disabled` prop — every caller that passes one " \
+        "is relying on it to refuse the write, not merely to grey the switch"
+
+    body = jsx[m.end():jsx.index("\n}", m.end())]
+    assert re.search(r'if\s*\(!disabled\)|disabled\s*\?\s*undefined|disabled\s*\|\|', body), \
+        "Toggle's click handler must check `disabled` before calling onChange — " \
+        "styling it grey while still writing the value is the bug this pins"
+
+
 def test_capabilities_reported_before_the_server_exists_are_not_lost():
     """
     A device registers BEFORE its ESPHome server is created — the listener

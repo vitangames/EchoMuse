@@ -41,6 +41,29 @@ def prediction_key(model_name: str) -> str:
     return model_name
 
 
+# openWakeWord ships its stock models with a version suffix in the FILENAME
+# ("hey_jarvis_v0.1.onnx"). That is a packaging convention, not part of the
+# wake word, and it has no business in a string a user reads.
+_VERSION_SUFFIX = re.compile(r"_v\d+(?:\.\d+)*$")
+
+
+def display_name(model_name: str) -> str:
+    """
+    The wake word as a person says it — "hey_jarvis_v0.1" -> "hey jarvis".
+
+    This is NOT cosmetic. Home Assistant compares the `wake_word_phrase` on
+    a pipeline start against the STATE of its wake-word select entity, whose
+    options are the display names we advertise
+    (esphome/assist_satellite.py: `ww_state.state == wake_word_phrase`, and
+    select.py's `_wake_words` dict is commented "name -> id"). So the phrase
+    we announce and the name we advertise must be the same string, or HA
+    matches neither and silently falls back to pipeline 1.
+
+    One function so the two call sites cannot drift.
+    """
+    return _VERSION_SUFFIX.sub("", prediction_key(model_name)).replace("_", " ")
+
+
 def models_dir(db_path: str | None = None) -> Path:
     """
     Resolve the custom-models directory: `oww_models/` beside the SQLite

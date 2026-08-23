@@ -522,3 +522,36 @@ func TestCrossingReportsTheThresholdItCleared(t *testing.T) {
 			"actually cleared, not the nominal one", got[1])
 	}
 }
+
+// TestCloseDuringPushDoesNotPanic reproduces the crash a wake word change
+// caused on hardware (2026-08-16).
+//
+// The mic goroutine captures the scorer pointer ONCE per stream and keeps
+// pushing to it for the life of that stream. A config push replaces the
+// scorer and closes the old one underneath it. While Close() closed the
+// channel enqueue sends on, the next 80ms frame panicked the process with
+// "send on closed channel" — the device died and start_server.sh restarted
+// it seconds later, which read as "changing the wake word crashes the Dot".
+//
+// Present since shadow mode shipped and latent because it needs BOTH
+// on-device scoring active AND the model changed.
+func TestCloseDuringPushDoesNotPanic(t *testing.T) {
+	for i := 0; i < 50; i++ {
+		s := NewScorer(&fakeInferer{score: 0.1}, 0.5, func(float32, float32, time.Time) {})
+
+		var wg sync.WaitGroup
+		wg.Add(1)
+		go func() { // the mic goroutine, holding the pointer it started with
+			defer wg.Done()
+			for j := 0; j < 200; j++ {
+				s.Push(make([]int16, 1280))
+			}
+		}()
+
+		time.Sleep(time.Duration(i%5) * time.Millisecond)
+		s.Close() // the config push
+		wg.Wait()
+
+		s.Close() // documented as safe to call twice
+	}
+}

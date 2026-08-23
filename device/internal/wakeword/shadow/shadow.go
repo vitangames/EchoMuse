@@ -106,6 +106,15 @@ type Scorer struct {
 	ch   chan []int16
 	done chan struct{}
 	stop sync.Once
+	// quit ends the scorer goroutine. Close must NOT close `ch`: the mic
+	// goroutine captures the scorer pointer once per stream (see
+	// DataClient.startMicStream) and keeps pushing to it, so closing the
+	// channel it sends on panics the process on the next 80ms frame.
+	quit chan struct{}
+	// closed makes enqueue a no-op after Close. Not required for safety once
+	// `ch` is never closed — a send into a buffered channel nobody reads is
+	// harmless — but it stops a dead scorer silently accruing drop counts.
+	closed atomic.Bool
 
 	// closer releases the inference engine, when one owns resources (the ORT
 	// sessions). Nil for an injected Inferer, e.g. in tests.
@@ -153,6 +162,7 @@ func NewScorer(inf wakeword.Inferer, threshold float32, onCross func(score, thre
 		onCross:   onCross,
 		ch:        make(chan []int16, queueFrames),
 		done:      make(chan struct{}),
+		quit:      make(chan struct{}),
 	}
 	go s.run()
 	return s
@@ -223,6 +233,12 @@ func (s *Scorer) PushBytes(b []byte) {
 // happen — deliberately one place, so "never block the audio path" is a
 // property of one function rather than a convention.
 func (s *Scorer) enqueue(cp []int16) {
+	// A closed scorer still receives frames: the mic goroutine holds the
+	// pointer it captured when the stream started, and a config push can
+	// replace and close it mid-stream.
+	if s.closed.Load() {
+		return
+	}
 	// Producer cadence, measured here rather than in Push/PushBytes so both
 	// entry points are covered by one site — the same reason drops are counted
 	// in exactly one place.
@@ -286,7 +302,8 @@ func (s *Scorer) Info() string { return s.info }
 // those can overlap.
 func (s *Scorer) Close() {
 	s.stop.Do(func() {
-		close(s.ch)
+		s.closed.Store(true)
+		close(s.quit)
 		<-s.done
 		// After the goroutine has exited, so no inference is in flight.
 		if s.closer != nil {
@@ -297,7 +314,13 @@ func (s *Scorer) Close() {
 
 func (s *Scorer) run() {
 	defer close(s.done)
-	for pcm := range s.ch {
+	for {
+		var pcm []int16
+		select {
+		case <-s.quit:
+			return
+		case pcm = <-s.ch:
+		}
 		s.mu.Lock()
 		reset := s.resetReq
 		s.resetReq = false

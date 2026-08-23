@@ -163,6 +163,56 @@ def test_capability_does_not_promote_a_lesser_mode():
         assert em_shadow.effective_mode(mode, trigger_capable=True) == mode
 
 
+# ── a missing classifier must not deafen the device (#191) ───────────────────
+
+
+def test_a_missing_model_stands_the_device_down_to_controller_wake():
+    """
+    A device cannot score a wake word whose classifier it does not have, and
+    under "on" the controller has stopped triggering on its behalf — so
+    nothing fires, nothing warns, and the dashboard reports it healthy.
+
+    Degrading to "shadow" would be the wrong answer dressed as a fallback:
+    shadow cannot score either. Only "off" puts the controller back in charge
+    of triggering, which is the one arrangement that still answers the user.
+    """
+    assert em_shadow.effective_mode(
+        "on", trigger_capable=True, model_ready=False) == em_shadow.MODE_OFF
+    assert em_shadow.effective_mode(
+        "shadow", trigger_capable=True, model_ready=False) == em_shadow.MODE_OFF
+    assert em_shadow.effective_mode(
+        "on", trigger_capable=False, model_ready=False) == em_shadow.MODE_OFF
+
+
+def test_model_readiness_is_assumed_when_not_stated():
+    """
+    Absence of evidence is not evidence of absence. Callers that do not know
+    what is installed keep today's behaviour — standing every device down on a
+    controller that simply has not looked would be a worse bug than the one
+    this prevents.
+    """
+    assert em_shadow.effective_mode("on", trigger_capable=True) == em_shadow.MODE_ON
+    assert em_shadow.effective_mode(
+        "on", trigger_capable=True, model_ready=True) == em_shadow.MODE_ON
+    assert em_shadow.effective_mode("shadow", trigger_capable=False) == em_shadow.MODE_SHADOW
+
+
+def test_a_ready_model_does_not_rescue_a_missing_capability():
+    """The two guards are independent; neither may mask the other."""
+    assert em_shadow.effective_mode(
+        "on", trigger_capable=False, model_ready=True) == em_shadow.MODE_SHADOW
+
+
+def test_off_stays_off_whatever_is_installed():
+    """
+    "off" already means the controller triggers, so there is nothing to stand
+    down and no reason for the model's presence to enter into it.
+    """
+    for ready in (True, False):
+        assert em_shadow.effective_mode(
+            "off", trigger_capable=True, model_ready=ready) == em_shadow.MODE_OFF
+
+
 def test_in_on_mode_only_the_device_triggers():
     """The controller keeps scoring — that is the comparison — but its own
     crossing must not start a turn, or every utterance is answered twice."""

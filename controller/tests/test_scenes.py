@@ -133,3 +133,29 @@ def test_outcome_cues_are_self_clearing_and_distinct():
         assert 0 < a["ttlSec"] <= 2
     assert ns["periodMs"] != err["periodMs"]
     assert err["periodMs"] < ns["periodMs"]   # error reads as more agitated
+
+
+def test_ack_cue_is_a_steady_hold_not_a_rhythm():
+    """
+    The acknowledgement cue says "heard you, nothing more to do" — it is not
+    an outcome, so it must not borrow the rhythm the outcome cues use to mean
+    something is wrong or was unheard.
+
+    It exists because a turn can end in milliseconds: Home Assistant's
+    satellite setup intercepts the wake word and ends the run immediately, so
+    the ring lit and cleared inside ~100ms and read as a glitch on a device
+    that was working. It stayed lit before only because the turn was hung.
+
+    Self-clearing like the others, and short enough not to bleed into the
+    next prompt — setup's two wake word tests were 3.0s and 5.6s apart on
+    hardware.
+    """
+    scene = em_scenes.resolve({})
+    ack = scene["ack_anim"]
+
+    assert ack["pattern"] == "solid", \
+        "a pulse would read as an outcome signal, which this is not"
+    assert "periodMs" not in ack, "a steady hold has no rhythm to carry"
+    assert 0 < ack["ttlSec"] <= 2, \
+        "must retire on the device's own ticker, and well inside the gap " \
+        "between the setup flow's two wake word prompts"

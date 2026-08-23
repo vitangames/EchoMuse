@@ -54,12 +54,15 @@ import em_db as db
 import em_auth as auth
 import em_ble_proxy
 import em_config_sections as sections_mod
+import em_firmware
 import em_ingressauth
 import em_oww_assets
 import em_oww_models
 import em_pki
 import em_player
 import em_recordings
+import em_volume
+import em_tts_output
 import em_wake_recorder
 import em_scenes
 import em_shadow
@@ -1110,7 +1113,11 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
     the EFFECTIVE config, never a request body: with per-section scoping a
     body is partial by design, and a device must always be sent the whole
     resolved picture.
+
+    One key is held back: a NEW `owwModel` is not sent to a device that scores
+    locally until the classifier is actually on it — see _hold_back_oww_model.
     """
+    effective, pending_model = _hold_back_oww_model(live, effective)
     await live.send_control({"type": "config", **effective})
     if "owwThreshold" in effective:
         live.oww_threshold = float(effective["owwThreshold"])
@@ -1120,6 +1127,10 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # em_api at module level).
         import em_esphome
         em_esphome.update_oww_model(device_id, effective["owwModel"])
+    if pending_model:
+        # The device is still on its previous wake word, still scoring
+        # locally, still answering. Install, then switch.
+        asyncio.create_task(_install_then_switch(device_id, pending_model))
     if "owwSpeexNs" in effective:
         live.oww_speex_ns = bool(effective["owwSpeexNs"])
     if "nsAsr" in effective:
@@ -1143,12 +1154,41 @@ async def _apply_live_config(device_id: str, live, effective: dict) -> None:
         # no code to send, leaving it deaf. em_shadow.effective_mode degrades
         # that to shadow.
         live.oww_on_device = em_shadow.effective_mode(
-            effective["owwOnDevice"], live.oww_trigger_capable
+            effective["owwOnDevice"], live.oww_trigger_capable,
+            getattr(live, "oww_model_ready", True),
         )
     if "eqBands" in effective:
         live.eq_bands = effective["eqBands"]
     if "eqLoudness" in effective:
         live.eq_loudness = bool(effective["eqLoudness"])
+    # The output chain is consumed HERE, not on the device — it ignores these
+    # five keys entirely — so this mirror is the only thing that carries them.
+    # Missing it meant a push wrote the database, sent JSON the device threw
+    # away, and changed nothing audible until the device happened to
+    # reconnect. Exactly the shape this function's docstring warns about, and
+    # it cost a whole listening test on 2026-08-19: every setting appeared to
+    # do nothing, because every setting WAS doing nothing.
+    if "limiterEnabled" in effective:
+        live.limiter_enabled = bool(effective["limiterEnabled"])
+    if "limiterThreshold" in effective:
+        live.limiter_threshold = float(effective["limiterThreshold"])
+    if "limiterRelease" in effective:
+        live.limiter_release = float(effective["limiterRelease"])
+    if "bassGuardEnabled" in effective:
+        live.bass_guard_enabled = bool(effective["bassGuardEnabled"])
+    if "bassGuardDb" in effective:
+        live.bass_guard_db = float(effective["bassGuardDb"])
+    if em_tts_output.CONFIG_KEY in effective:
+        try:
+            live.tts_output_media_player = em_tts_output.normalise_entity_id(
+                effective[em_tts_output.CONFIG_KEY]
+            )
+        except ValueError as e:
+            # A hand-edited/stale DB value must never take down a live config
+            # push. Disable the optional route and keep the historical speaker
+            # path instead; API writes are rejected earlier below.
+            log.warning(f"[{device_id}] Ignoring invalid TTS output: {e}")
+            live.tts_output_media_player = ""
     live.led_scene = em_scenes.resolve(effective)
 
 
@@ -1193,6 +1233,14 @@ async def _post_device_config(request: web.Request) -> web.Response:
     """
     device_id = request.match_info["id"]
     body = await _json_body(request)
+
+    if em_tts_output.CONFIG_KEY in body:
+        try:
+            body[em_tts_output.CONFIG_KEY] = em_tts_output.normalise_entity_id(
+                body[em_tts_output.CONFIG_KEY]
+            )
+        except ValueError as e:
+            return _error("bad_tts_output", str(e), 400)
 
     loop = asyncio.get_event_loop()
     row = await loop.run_in_executor(None, db.get_device, device_id)
@@ -1680,7 +1728,7 @@ async def _run_update(device_id: str, release: dict,
             await _push_log_event(device_id, "info", "controller",
                                   f"Using uploaded binary ({len(binary):,} bytes)")
         else:
-            binary = await _fetch_binary(release["url"])
+            binary = await _fetch_binary(release["url"], release.get("version", ""))
             if binary is None:
                 await _update_failed(device_id,
                                      "Failed to fetch binary from GitHub")
@@ -2772,7 +2820,7 @@ async def _get_provision_latest_binary(request: web.Request) -> web.Response:
     if release is None:
         return _error("no_release", "No release information available", 404)
 
-    binary = await _fetch_binary(release["url"])
+    binary = await _fetch_binary(release["url"], release.get("version", ""))
     if binary is None:
         return _error("fetch_failed", "Could not download binary from GitHub", 502)
 
@@ -3122,6 +3170,14 @@ async def _post_global_config(request: web.Request) -> web.Response:
     """
     config = await _json_body(request)
     loop = asyncio.get_event_loop()
+
+    if em_tts_output.CONFIG_KEY in config:
+        try:
+            config[em_tts_output.CONFIG_KEY] = em_tts_output.normalise_entity_id(
+                config[em_tts_output.CONFIG_KEY]
+            )
+        except ValueError as e:
+            return _error("bad_tts_output", str(e), 400)
 
     explicit_replace = bool(config.pop("replace", False))
     # Raw (defaults NOT underlaid): see get_global_device_config_raw — a
@@ -3613,6 +3669,120 @@ def _oww_wanted_models(device_id: str) -> list[str]:
     return [model] if model else []
 
 
+def _hold_back_oww_model(live, effective: dict):
+    """
+    Keep a NEW wake word off a device until it has the model for it.
+
+    Returns (config_to_send, pending_model). `pending_model` is the model the
+    device should end up on once the classifier is installed, or None when the
+    change can go straight through.
+
+    A device cannot score a wake word whose classifier it does not have. Under
+    `owwOnDevice=on` the controller has stood down and no longer triggers on
+    its behalf, so telling the device to use a model it lacks produced a device
+    with NO wake word: nothing fired, nothing warned, and the dashboard
+    reported it healthy (#191). Selecting a wake word a device was never
+    provisioned with is an ordinary dashboard action.
+
+    So the device is never told about the new model until the file is there.
+    It keeps listening for its CURRENT wake word, on-device, the whole time —
+    no silent fall back to controller-side scoring, which is a posture the user
+    did not ask for and would not see. If the install fails, the device simply
+    stays where it was.
+
+    Only devices that actually score locally are held back. With
+    `owwOnDevice=off` the controller does the scoring and the file on the
+    device is irrelevant, so the change applies immediately — which is the
+    common case, and it stays instant.
+
+    Both the old and the NEW mode are consulted: turning on-device scoring on
+    in the same save that changes the wake word would otherwise slip through
+    on the strength of the old mode being "off".
+    """
+    new_model = (effective.get("owwModel") or "").strip()
+    if not new_model or new_model == live.oww_model:
+        return effective, None
+    if not live.oww_shadow_capable:
+        return effective, None
+
+    was_local = live.oww_on_device != em_shadow.MODE_OFF
+    now_local = em_shadow.normalise_mode(
+        effective.get("owwOnDevice", live.oww_on_device)
+    ) != em_shadow.MODE_OFF
+    if not (was_local or now_local):
+        return effective, None
+
+    held = dict(effective)
+    held["owwModel"] = live.oww_model
+    return held, new_model
+
+
+async def _install_then_switch(device_id: str, model: str) -> None:
+    """
+    Install a wake word classifier, then move the device onto it.
+
+    Background task: the push is a multi-megabyte shell-plane transfer over a
+    link measured at 5-7% packet loss, and blocking the config save on it would
+    time out the request without making anything safer. Nothing is degraded
+    while it runs — the device is still on its previous wake word and still
+    scoring locally.
+
+    The sync is idempotent, so a device that already has the model completes in
+    an md5 compare and the switch is effectively immediate.
+    """
+    live = _devices.get(device_id)
+    if live is None:
+        return
+
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Installing wake word model {model} before switching to it"
+    )
+    try:
+        result = await _sync_oww_assets(live, device_id)
+    except Exception as e:
+        result = {"ok": False, "error": str(e)}
+
+    live = _devices.get(device_id)
+    if live is None:
+        return
+
+    if not result.get("ok"):
+        # Deliberately leaves the device where it was: on a wake word it can
+        # actually hear. The controller is scoring the NEW model (fleet config
+        # decides that), so the two disagree until this is resolved — worth
+        # saying loudly, and better than a device that hears nothing.
+        await _push_log_event(
+            device_id, "error", "controller",
+            f"Could not install wake word model {model} "
+            f"({result.get('error')}) — this device is still using "
+            f"{live.oww_model}"
+        )
+        log.error(f"[api] [{device_id}] wake word switch to {model} abandoned: "
+                  f"{result.get('error')} — device left on {live.oww_model}")
+        return
+
+    effective = await asyncio.get_event_loop().run_in_executor(
+        None, db.get_effective_device_config, device_id
+    )
+    if (effective.get("owwModel") or "").strip() != model:
+        # Changed again while the push was running; that save owns the
+        # outcome and has its own install task.
+        log.info(f"[api] [{device_id}] wake word changed again during install "
+                 f"— dropping the switch to {model}")
+        return
+
+    await live.send_control({"type": "config", **effective})
+    live.oww_model = model
+    import em_esphome
+    em_esphome.update_oww_model(device_id, model)
+    await _push_log_event(
+        device_id, "info", "controller",
+        f"Wake word model {model} installed — device switched"
+    )
+    log.info(f"[api] [{device_id}] wake word switched to {model} after install")
+
+
 async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
     """
     Make a device's asset directory match what it needs. Idempotent.
@@ -3661,10 +3831,16 @@ async def _sync_oww_assets(live, device_id: str, progress=None) -> dict:
 
         dest = em_oww_assets.device_path(asset.name)
         part = f"{dest}.part"
-        pushed = await _stream_file_to_device(live, data, part, mode="644")
-        if not pushed:
-            await say("error", f"{asset.name} transfer failed: {pushed}")
-            return {"ok": False, "error": f"{asset.name}: {pushed}"}
+        # NOT `pushed` — that is the accumulator above, and assigning the
+        # transfer result to it shadowed the list on the first file, so the
+        # append below raised AttributeError and asset installation failed
+        # outright. TransferResult is truthy-compatible, which is what let
+        # this reach a release: every `if not …` call site kept working and
+        # only the one that treated it as a list broke.
+        sent = await _stream_file_to_device(live, data, part, mode="644")
+        if not sent:
+            await say("error", f"{asset.name} transfer failed: {sent}")
+            return {"ok": False, "error": f"{asset.name}: {sent}"}
 
         res = await _shell_run(live, (
             f'GOT=$(busybox md5sum {part} | busybox cut -d" " -f1); '
@@ -4044,8 +4220,27 @@ async def _get_support_bundle(request: web.Request) -> web.Response:
     )
 
 
-async def _fetch_binary(download_url: str) -> Optional[bytes]:
-    """Download the binary from a GitHub release asset URL."""
+async def _fetch_binary(download_url: str,
+                        version: str = "") -> Optional[bytes]:
+    """
+    The release binary, from disk if we already have it.
+
+    A published tag never changes what it points at, so the download is worth
+    doing once per release rather than once per device — a fleet update used to
+    pull the same ~10MB for every Dot, and the provisioning wizard again for
+    every device it set up.
+
+    `version` is optional so a caller with only a URL still works; it simply
+    does not get the cache. Nothing here can fail an update: a cache miss, an
+    unwritable directory or a corrupt entry all end in an ordinary download.
+    """
+    if version:
+        cached = await asyncio.get_event_loop().run_in_executor(
+            None, em_firmware.read, version
+        )
+        if cached is not None:
+            return cached
+
     log.info(f"[api] Fetching binary: {download_url}")
     try:
         async with aiohttp.ClientSession() as session:
@@ -4056,10 +4251,18 @@ async def _fetch_binary(download_url: str) -> Optional[bytes]:
                 if resp.status != 200:
                     log.error(f"[api] Binary download failed: HTTP {resp.status}")
                     return None
-                return await resp.read()
+                data = await resp.read()
     except Exception as e:
         log.error(f"[api] Binary download exception: {e}")
         return None
+
+    if version and data:
+        # Off the event loop: hashing and writing 10MB blocks it for long
+        # enough to delay speaker frames, and this runs during an OTA.
+        await asyncio.get_event_loop().run_in_executor(
+            None, em_firmware.write, version, data
+        )
+    return data
 
 
 # ─── Periodic background tasks ────────────────────────────────────────────────
@@ -4263,7 +4466,11 @@ def _stored_volume(row):
     if level is None:
         return None
     try:
-        return max(0.0, min(1.0, float(level) / 175.0))
+        # float() first, deliberately: em_volume swallows bad input and
+        # returns 0.0, which is the right answer on the audio path and the
+        # wrong one here — this function's None means "not known", and a
+        # corrupt stored value must not report as "silent".
+        return em_volume.device_level_to_ha(float(level))
     except (TypeError, ValueError):
         return None
 

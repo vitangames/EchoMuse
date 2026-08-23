@@ -1,5 +1,7 @@
 from pathlib import Path
 
+import pytest
+
 import em_oww_models as owm
 
 
@@ -74,3 +76,48 @@ def test_in_use_by_matches_path_refs_only(tmp_path):
         "device-d": None,
     }
     assert owm.in_use_by(str(model), configs) == ["device-a"]
+
+
+# ── display_name ──────────────────────────────────────────────────────────
+
+def test_display_name_strips_the_version_suffix():
+    assert owm.display_name("hey_jarvis_v0.1") == "hey jarvis"
+    assert owm.display_name("alexa_v0.1") == "alexa"
+
+
+def test_display_name_handles_custom_model_paths():
+    """
+    Custom models arrive as a path (owwModel stores one), and carry no
+    version suffix — oww_forge names the file after the phrase, which is
+    the only source of the name that exists for them: the ONNX files have
+    no metadata at all (metadata_props={}, empty doc strings, raw torch_jit
+    exports) and custom models are not in openwakeword.MODELS either.
+    """
+    assert owm.display_name(
+        "/data/oww_models/hey_clarra.onnx") == "hey clarra"
+    assert owm.display_name("hey_clarra") == "hey clarra"
+
+
+def test_display_name_leaves_a_version_inside_the_name_alone():
+    """Only a TRAILING _v<n> is a packaging suffix."""
+    assert owm.display_name("hey_v2_robot") == "hey v2 robot"
+
+
+def test_display_name_matches_openwakeword_own_names():
+    """
+    The version suffix is a filename convention, so trimming it is a guess
+    unless it is checked against the package that invented the convention.
+    openwakeword.MODELS is keyed by the clean name and values point at the
+    versioned file, which makes it the authority for every stock model.
+
+    Skipped where openwakeword is absent — CI installs pytest/numpy/scipy/
+    pyyaml only, and em_oww_models stays dependency-free so it can be unit
+    tested at all. Where the package IS present this is exact.
+    """
+    openwakeword = pytest.importorskip("openwakeword")
+
+    for name, spec in openwakeword.MODELS.items():
+        stem = Path(spec["model_path"]).stem
+        assert owm.display_name(stem) == name.replace("_", " "), (
+            f"display_name({stem!r}) disagrees with openwakeword's own name "
+            f"for the model, {name!r}")

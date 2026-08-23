@@ -23,7 +23,13 @@ config key ends up belonging to no section.
 SECTIONS: dict[str, dict] = {
     "playback": {
         "label": "Playback",
-        "keys": ["eqBands", "eqLoudness", "duckDb"],
+        "keys": ["eqBands", "eqLoudness", "duckDb",
+                 "limiterEnabled", "limiterThreshold", "limiterRelease",
+                 "bassGuardEnabled", "bassGuardDb"],
+    },
+    "tts_output": {
+        "label": "TTS output",
+        "keys": ["tts_output_media_player"],
     },
     "wakeword": {
         "label": "Wake word",

@@ -568,15 +568,19 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 	gainDb := -1
 	gainLin := 1.0
 
-	// On-device shadow scoring, read once per stream rather than per period:
-	// the pointer only changes on a config push, which also restarts nothing,
-	// so a stream that began before the change keeps using the scorer it
-	// started with until the next StartMic. Reset because a StopMic/StartMic
-	// pair happens after every voice turn and the detector must not splice
-	// across the gap.
-	shadowScorer := d.ShadowScorer()
-	if shadowScorer != nil {
-		shadowScorer.Reset()
+	// On-device shadow scoring. Reset at stream start because a
+	// StopMic/StartMic pair happens after every voice turn and the detector
+	// must not splice across the gap.
+	//
+	// The pointer is re-read PER FRAME below, not captured here. It used to be
+	// captured, on the reasoning that a stream which began before a config
+	// change could keep using the scorer it started with — but a config change
+	// CLOSES that scorer, so the stream went on feeding a dead one and the
+	// newly installed scorer never saw a single frame. Wake word detection
+	// then stayed dead until the next StartMic, which only follows a voice
+	// turn, which could not happen because the wake word was dead.
+	if sc := d.ShadowScorer(); sc != nil {
+		sc.Reset()
 	}
 
 	sendFrame := func(payload []byte) {
@@ -798,8 +802,10 @@ func (d *DataClient) streamMic(conn *websocket.Conn, stopCh <-chan struct{}, loc
 					// PushBytes never blocks: it drops when the scorer is
 					// behind rather than delaying this loop, which reads
 					// 160ms ALSA batches out of a 160ms-deep ring.
-					if shadowScorer != nil {
-						shadowScorer.PushBytes(buf[:vadOwwChunkBytes])
+					// Re-read per frame: a config push can swap the scorer
+					// mid-stream, and the replaced one is closed.
+					if sc := d.ShadowScorer(); sc != nil {
+						sc.PushBytes(buf[:vadOwwChunkBytes])
 					}
 					sendFrame(buf[:vadOwwChunkBytes])
 					buf = buf[vadOwwChunkBytes:]

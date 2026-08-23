@@ -47,6 +47,8 @@ import asyncio
 import logging
 
 import em_eq
+import em_limiter
+import em_mbc
 
 log = logging.getLogger("player")
 
@@ -527,7 +529,28 @@ class MediaSession:
         # gain or lose the capability mid-stream, and this runs ~23×/s.
         frame_type, eos_type = _frame_types(device)
 
-        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness)
+        # Built once for the whole feed and then UPDATED in place, never
+        # rebuilt: both processors carry filter and gain state, so a new
+        # instance mid-track restarts the crossover and clicks. Constructed
+        # even when disabled — a bypassed instance keeps its state warm, which
+        # is what makes toggling one mid-song silent.
+        #
+        # In place because these are taste parameters tuned by ear in a real
+        # room. Reading them once per stream meant every A/B cost a track
+        # skip, which is long enough that nobody can hold the two in their
+        # head (measured against a listening test on 2026-08-19: no audible
+        # difference reported, because none of the changes were reaching the
+        # audio at all).
+        eq = em_eq.StreamingEQ(SPEAKER_RATE, device.eq_bands, device.eq_loudness,
+                               limiter=em_limiter.Limiter(
+                                   SPEAKER_RATE,
+                                   threshold_db=device.limiter_threshold,
+                                   release_ms=device.limiter_release,
+                                   enabled=device.limiter_enabled),
+                               guard=em_mbc.BassGuard(
+                                   SPEAKER_RATE,
+                                   bass_guard_db=device.bass_guard_db,
+                                   enabled=device.bass_guard_enabled))
         start_pos = self._pos
         proc = None
         seg_start = loop.time()
@@ -591,6 +614,26 @@ class MediaSession:
             await self._push_state()
 
             while True:
+                # Config is pushed live (_apply_live_config), so re-read it
+                # per chunk. update() compares before it touches anything, so
+                # the steady-state cost is a tuple comparison ~23×/s.
+                #
+                # Logged whenever it MOVES, which is once at the start of the
+                # stream and once per dashboard change. That line is the only
+                # proof that a setting reached the audio: the stages cancel
+                # each other's most obvious cue, so "I heard nothing" cannot
+                # distinguish a working chain from a config that never
+                # arrived. See em_eq.describe_chain.
+                if eq.update(bands=device.eq_bands,
+                             loudness=device.eq_loudness,
+                             limiter_enabled=device.limiter_enabled,
+                             limiter_threshold=device.limiter_threshold,
+                             limiter_release=device.limiter_release,
+                             guard_enabled=device.bass_guard_enabled,
+                             guard_db=device.bass_guard_db):
+                    log.info(f"[{self.device_id}] Output chain: "
+                             f"{em_eq.describe_chain(device.eq_bands, device.eq_loudness, eq.limiter, eq.guard)}")
+
                 try:
                     if pending is not None:
                         chunk, pending = pending, None
@@ -681,7 +724,8 @@ class MediaSession:
                     f"[{self.device_id}] Media feed done: "
                     f"{sent // SPEAKER_BYTES} periods, source max read "
                     f"{src_max_ms:.0f}ms, {src_stalls} stall(s) over "
-                    f"{SOURCE_STALL_MS:.0f}ms")
+                    f"{SOURCE_STALL_MS:.0f}ms, "
+                    f"{em_eq.describe_activity(eq.limiter, eq.guard)}")
             if not eos_sent:
                 # The flush discard stays armed until it sees this stream's
                 # EOS — same contract as barge-in aborting stream_speaker.

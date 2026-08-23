@@ -20,6 +20,7 @@ Usage:
     db.log_device(device_id, "info", "device", "Connected")
 """
 
+import hashlib
 import json
 import logging
 import os
@@ -118,30 +119,31 @@ DEFAULT_DEVICE_CONFIG = {
     # cancels it and starts a fresh turn. Requires device AEC (aecEnabled)
     # on — with barge-in the mic streams through playback, and AEC is what
     # stops the device hearing itself — so aecEnabled above defaults on with
-    # it, and the two move together. bargeInThreshold is used as-is,
-    # deliberately BELOW the normal wake threshold: the echo at the mic is
-    # ~25dB louder than the person talking over it, so speech-over-TTS wake
-    # scores are inherently depressed (~0.10–0.12 measured), while post-AEC
-    # self-echo scores only 0.004 (0.055 worst-case unconverged) — there is
-    # no self-trigger risk down to ~0.08.
+    # it, and the two move together.
     #
-    # That 0.004 is STALE and the margin is wider than it says: v2.7.8 made
-    # the filter hold convergence across turns, so self-echo measures
-    # 0.002–0.003. 0.10 sat awkwardly close to real speech-over-TTS scores,
-    # which is the wrong way to be wrong — barge-in that never fires is
-    # undiagnosable from the outside ("it just ignores me"), while barge-in
-    # that fires too eagerly is self-evident and adjustable. 0.05 is the
-    # dashboard slider floor, so the only way to tune from here is UP, which
-    # is the direction the visible failure asks for.
+    # 0.25, raised from 0.05 on 2026-08-20 after the device interrupted
+    # ITSELF. The old value was chosen against short responses, where the
+    # watcher's peak score over a whole turn measured 0.029, and against a
+    # post-AEC self-echo figure of 0.002–0.003. Long-form speech breaks both
+    # premises: a story peaked at 0.091 and 0.184 on the same hardware, and
+    # was cut off mid-sentence twice in a row. Continuous synthetic narration
+    # offers far more phoneme sequences resembling a wake word than a short
+    # factual reply, and hundreds more frames to find one in.
     #
-    # Watch one interaction: the beamformer locks a different mic per turn
-    # and each has its own echo path, so AEC re-converges per turn (per-
-    # channel filter states are the unbuilt fix) — and the one measured
-    # self-echo figure above 0.05 is that unconverged case at 0.055. The
-    # symptom would be a device cutting its own response short. This fleet
-    # runs 0.05 with beamforming and AEC both on and does not do that.
+    # The comment this replaces predicted exactly that symptom — "a device
+    # cutting its own response short" — and asserted the fleet did not do it.
+    # It does; the measurement had simply never included a long answer.
+    #
+    # 0.25 sits below real speech-over-TTS scores (0.3–0.5 observed, depressed
+    # because the echo at the mic is ~25dB louder than the person) so genuine
+    # barge-in still fires, and above the 0.184 that was self-triggering. The
+    # margin at the top is thinner than it was: if barge-in starts being
+    # missed, that is this trade, and the answer is a per-channel AEC filter
+    # state rather than creeping back down. em_barge's two-consecutive-frame
+    # rule is the other half — it is what makes a low bar survivable at all,
+    # and the two are meant to move together.
     "bargeInEnabled":   True,
-    "bargeInThreshold": 0.05,
+    "bargeInThreshold": 0.25,
     # How far music is attenuated while a voice turn plays OVER it, on
     # firmware that can mix the two planes (the "audio_mix" capability).
     # Ducking replaces pausing there: the music feed runs 4s ahead of
@@ -217,6 +219,23 @@ DEFAULT_DEVICE_CONFIG = {
     "beamAngle":        -1,
     "eqBands":          [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
     "eqLoudness":       False,
+    # Output limiter. On by default: the EQ chain hard-clipped anything it
+    # boosted past full scale (#231), and a default that leaves that in place
+    # protects nobody. Threshold/release are config rather than constants
+    # because limiter character wants tuning by ear in a real room — the same
+    # reasoning as duckDb and the LED meter curve.
+    # Dynamic bass guard. Removes low-frequency content the driver cannot
+    # deliver, which is what makes the midrange clean — see em_mbc.
+    "bassGuardEnabled": True,
+    "bassGuardDb":      -30.0,
+    "limiterEnabled":   True,
+    "limiterThreshold": -1.0,
+    "limiterRelease":   150,
+    # Optional controller-side output route for Assist responses. Empty keeps
+    # the existing Echo Dot speaker path. A media_player entity id dispatches
+    # HA's TTS URL through the satellite's existing ESPHome connection, so it
+    # does not alter or consume the mic/STT/wake-word stream.
+    "tts_output_media_player": "",
     # LED ring scene (controller-side rendering — see em_scenes.py).
     # ledListenColor/ledThinkColor only apply when ledScene is "custom".
     "ledScene":         "standard",
@@ -751,6 +770,37 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '18' WHERE key = 'schema_version';
     """,
+
+    # ── v19 — the ESPHome identity becomes a stored fact ────────────────────
+    #
+    # Home Assistant keys its device registry on the mac_address an ESPHome
+    # device reports, so this value IS the device's identity in HA — nothing
+    # routes to it and no packet carries it. It was DERIVED from the serial
+    # on every use, which made identity a function, with two consequences.
+    #
+    # The derivation stripped non-hex characters from an alphanumeric serial,
+    # so devices from one batch differing only in the trailing characters
+    # collapsed to the same address and Home Assistant treated two Echoes as
+    # one, overwriting the first (#212, found by @lennart24 in #217):
+    #
+    #     G090LF1180440C9K -> 090F1180440C9 -> 90:F1:18:04:40:C9
+    #     G090LF1180440C9R -> 090F1180440C9 -> 90:F1:18:04:40:C9
+    #
+    # And because it was a function, changing it to fix that would have
+    # changed EVERY device's identity, orphaning every HA device row and the
+    # automations referencing their entities. Storing it is what separates
+    # the two: the fix reaches the devices that need it and nobody else.
+    #
+    # The seeding rule is the whole point of the fixup below. A device whose
+    # current address is unique keeps it, so nothing that works today moves.
+    # Within a colliding group the oldest keeps it — it is the one HA
+    # actually has registered — and the others take the new derivation, since
+    # they are the ones being overwritten right now and cannot get worse.
+    """
+    ALTER TABLE devices ADD COLUMN esphome_mac TEXT;
+
+    UPDATE system_config SET value = '19' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -776,7 +826,45 @@ def _fixup_v11(conn) -> None:
             )
 
 
-_MIGRATION_FIXUPS = {11: _fixup_v11}
+def _fixup_v19(conn) -> None:
+    """
+    Seed devices.esphome_mac so no working device changes identity.
+
+    Preserving the CURRENT address wherever it is unique is the entire
+    reason this is a fixup rather than a plain DEFAULT: Home Assistant has
+    already registered these devices under those values, and a new one
+    orphans the device row along with every automation referencing its
+    entities.
+
+    Ordering inside a colliding group is by first_seen then device_id —
+    deterministic, so a re-run after a failed migration reaches the same
+    answer rather than reshuffling which device keeps its identity.
+    """
+    rows = conn.execute(
+        "SELECT device_id, first_seen FROM devices ORDER BY first_seen, device_id"
+    ).fetchall()
+
+    by_legacy: dict[str, list[str]] = {}
+    for row in rows:
+        by_legacy.setdefault(_legacy_serialno_to_mac(row["device_id"]), []).append(
+            row["device_id"])
+
+    for legacy, ids in by_legacy.items():
+        # First in the group keeps what HA already knows; the rest were being
+        # overwritten by it, so they take the new derivation.
+        conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
+                     (legacy, ids[0]))
+        for device_id in ids[1:]:
+            conn.execute("UPDATE devices SET esphome_mac = ? WHERE device_id = ?",
+                         (esphome_mac_for(device_id), device_id))
+            log.warning(
+                f"[db] {device_id} shared an ESPHome identity with {ids[0]} "
+                f"({legacy}) — assigned {esphome_mac_for(device_id)}. Home "
+                f"Assistant will discover it as a new device; the other keeps "
+                f"its entities."
+            )
+
+_MIGRATION_FIXUPS = {11: _fixup_v11, 19: _fixup_v19}
 
 # ─── Connection management ────────────────────────────────────────────────────
 
@@ -954,6 +1042,81 @@ def _migrate(conn: sqlite3.Connection) -> None:
 
     new_version = current + len(pending)
     log.info(f"Schema migrated to v{new_version}")
+
+
+# ─── ESPHome identity ─────────────────────────────────────────────────────────
+#
+# Home Assistant keys its device registry on the mac_address an ESPHome device
+# reports, so this value IS a device's identity in HA. It is not a network
+# address in any functional sense: nothing routes to it and no packet carries
+# it. We supply one because the protocol requires it — HA's config flow aborts
+# its zeroconf step with "mdns_missing_mac" when the TXT record lacks it, and
+# never produces a discovery card at all.
+#
+# The prefix is fixed and the rest is a hash of the serial.
+#
+# 0x02 in the first octet is the LOCALLY ADMINISTERED bit — the MAC equivalent
+# of a private address range, declaring "not from an IEEE OUI, do not expect
+# global uniqueness". Bit 0 is a different flag entirely (unicast vs
+# multicast) and must stay clear; a raw hash sets it half the time, producing
+# an address that is not a valid unicast MAC. Choosing a fixed prefix that
+# satisfies both by CONSTRUCTION is why this is not a mask applied to a hash:
+# there is no bit for a later change to forget. Docker (02:42) and QEMU
+# (52:54:00) do the same thing for the same reason.
+#
+# 32 bits of hash rather than 48 is the cost, and it is affordable because
+# uniqueness is only ever needed within ONE Home Assistant registry — a
+# household fleet. At 100 devices the collision probability is 1.15e-6.
+ESPHOME_MAC_PREFIX = (0x02, 0xEC)
+
+
+def esphome_mac_for(device_id: str) -> str:
+    """The address a device WOULD be given. Deterministic; see the note above."""
+    digest = hashlib.md5(device_id.encode("utf-8")).digest()
+    octets = list(ESPHOME_MAC_PREFIX) + list(digest[:4])
+    return ":".join(f"{b:02X}" for b in octets)
+
+
+def _legacy_serialno_to_mac(device_id: str) -> str:
+    """
+    The pre-v19 derivation, kept ONLY so the migration can recognise the
+    identity Home Assistant already holds for a device.
+
+    It stripped non-hex characters from an alphanumeric serial, which is the
+    bug: devices differing only in the discarded characters collide. Never
+    call this for a new device.
+    """
+    hex_chars = "".join(c for c in device_id if c in "0123456789ABCDEFabcdef")
+    hex_chars = hex_chars[-12:].upper().zfill(12)
+    return ":".join(hex_chars[i:i + 2] for i in range(0, 12, 2))
+
+
+def get_esphome_mac(device_id: str) -> str:
+    """
+    The stored ESPHome identity for a device, assigning one if it has none.
+
+    Assign-once, like get_esphome_port/assign_esphome_port beside it, and for
+    the same reason: Home Assistant keys its registry on the value, so it must
+    never change under a device that is already registered. A device row that
+    predates v19 was seeded by that migration; one created afterwards is
+    assigned here on first use.
+    """
+    row = _q1("SELECT esphome_mac FROM devices WHERE device_id = ?", (device_id,))
+    if row is not None and row["esphome_mac"]:
+        return row["esphome_mac"]
+    mac = esphome_mac_for(device_id)
+    with _tx() as conn:
+        # Only where it is still unset: a concurrent caller may have won, and
+        # the first answer must stand.
+        conn.execute(
+            "UPDATE devices SET esphome_mac = ? "
+            "WHERE device_id = ? AND (esphome_mac IS NULL OR esphome_mac = '')",
+            (mac, device_id),
+        )
+    row = _q1("SELECT esphome_mac FROM devices WHERE device_id = ?", (device_id,))
+    # No device row yet (servers can be built before registration) — the value
+    # is still correct and will be stored the first time there is a row.
+    return (row["esphome_mac"] if row and row["esphome_mac"] else mac)
 
 
 # ─── Device registry ──────────────────────────────────────────────────────────
@@ -1391,13 +1554,72 @@ def get_esphome_port(device_id: str) -> Optional[int]:
     return row["esphome_api_port"]  # may be None (unassigned)
 
 
+# Ports are floored to this base at allocation time, so two controllers on one
+# network hand out satellite ports from disjoint ranges. In practice that means
+# the GA and Early Access add-ons: channels share no storage, so each has its
+# own database and its own counter, and both would otherwise start at 16001.
+#
+# Home Assistant keys an ESPHome config entry on host and port, so after a
+# channel switch its stored entries point into the other channel's range and it
+# reaches whichever device now holds that number. Measured 2026-08-19: every
+# satellite entity unavailable for a day, wake words still firing and turns
+# dying in milliseconds because no HA pipeline was behind them. Disjoint ranges
+# turn that into entries that visibly fail to connect — the same outcome the
+# never-reuse rule below already chooses for a deprovisioned device.
+#
+# A FLOOR rather than a seed, deliberately: the counter only ever moves
+# forwards, so a base can never land on a port already assigned. A fresh
+# database allocates its first port at the base; an established one jumps to it
+# at the next allocation and leaves every fielded device exactly where it is.
+#
+# BLE proxy ports follow at +BLE_PORT_OFFSET, so a base of 16101 gives 17101
+# without a second setting. The 100-port spacing between the channel defaults
+# is what bounds this: a channel would need 100 devices to reach the next one's
+# range.
+ESPHOME_PORT_BASE_DEFAULT = 16001
+
+
+def _esphome_port_base() -> int:
+    """
+    EM_ESPHOME_PORT_BASE, validated, falling back to the default on anything
+    unusable — a controller that refused to start over a stray port number
+    would be a worse outcome than one that allocates where it always did, and
+    the warning names it either way.
+    """
+    raw = os.environ.get("EM_ESPHOME_PORT_BASE", "").strip()
+    if not raw:
+        return ESPHOME_PORT_BASE_DEFAULT
+    try:
+        base = int(raw)
+    except ValueError:
+        log.warning(
+            f"[db] EM_ESPHOME_PORT_BASE={raw!r} is not a number — "
+            f"using {ESPHOME_PORT_BASE_DEFAULT}"
+        )
+        return ESPHOME_PORT_BASE_DEFAULT
+    # Room below for the privileged range and above for the BLE range plus a
+    # fleet's worth of climbing.
+    if not 1024 <= base <= 60000:
+        log.warning(
+            f"[db] EM_ESPHOME_PORT_BASE={base} is outside 1024-60000 — "
+            f"using {ESPHOME_PORT_BASE_DEFAULT}"
+        )
+        return ESPHOME_PORT_BASE_DEFAULT
+    return base
+
+
+# Read once at import, matching DEBUG: the value is consulted per allocation,
+# so re-reading it live would let an edit renumber a fleet mid-run.
+ESPHOME_PORT_BASE = _esphome_port_base()
+
+
 def assign_esphome_port(device_id: str) -> int:
     """
     Allocate and persist an ESPHome API port for this device.
 
     Takes the next available port from next_esphome_port in system_config,
-    increments the counter, persists both atomically, and returns the
-    allocated port.
+    floored to ESPHOME_PORT_BASE, increments the counter, persists both
+    atomically, and returns the allocated port.
 
     Port allocation is monotonically increasing and never reuses freed ports
     (see ESPHOME_SPEC.md §2.2 for the rationale — sparse range is intentional
@@ -1423,7 +1645,16 @@ def assign_esphome_port(device_id: str) -> int:
         next_row = conn.execute(
             "SELECT value FROM system_config WHERE key = 'next_esphome_port'"
         ).fetchone()
-        port = int(next_row["value"])
+        stored = int(next_row["value"])
+        port = max(stored, ESPHOME_PORT_BASE)
+        if port != stored:
+            # Says the base did something. An option that silently has no
+            # effect on an established install is the shape this project
+            # keeps paying for.
+            log.info(
+                f"[db] ESPHome port counter raised {stored} → {port} "
+                f"(EM_ESPHOME_PORT_BASE)"
+            )
 
         conn.execute(
             "UPDATE devices SET esphome_api_port = ? WHERE device_id = ?",
@@ -2090,10 +2321,7 @@ def create_user(username: str, password_hash: str, role: str = "readonly") -> in
 
 def get_user_by_ha_id(ha_user_id: str) -> Optional[sqlite3.Row]:
     """Return the user linked to a Home Assistant user id, or None."""
-    with _conn() as conn:
-        return conn.execute(
-            "SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,)
-        ).fetchone()
+    return _q1("SELECT * FROM users WHERE ha_user_id = ?", (ha_user_id,))
 
 
 def create_ha_user(ha_user_id: str, username: str, role: str) -> int:
@@ -2177,6 +2405,28 @@ def admin_count() -> int:
 def user_count() -> int:
     """Return the total number of users. Used for first-run bootstrap check."""
     row = _q1("SELECT COUNT(*) AS n FROM users")
+    return row["n"] if row else 0
+
+
+def ha_admin_count() -> int:
+    """
+    Admins who can actually sign in through Home Assistant ingress.
+
+    Local password accounts are UNREACHABLE under the add-on — the landing
+    page authenticates through ingress before rendering any form, and there
+    is deliberately no Sign out — so a local admin is an admin nobody can
+    use. Counting rows instead of reachable admins is what stranded #235:
+    a local admin created first made every Home Assistant user read-only,
+    permanently, with hand-editing the database as the only way back.
+
+    Keyed on ha_user_id rather than on the password sentinel, because the
+    sentinel is a detail of how HA rows are stored and this is a question
+    about how someone gets in.
+    """
+    row = _q1(
+        "SELECT COUNT(*) AS n FROM users "
+        "WHERE ha_user_id IS NOT NULL AND role = 'admin'"
+    )
     return row["n"] if row else 0
 
 

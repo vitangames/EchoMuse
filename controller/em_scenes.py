@@ -234,6 +234,28 @@ def resolve(config: dict) -> dict:
             "pattern": "pulse", "colors": outcome_colors,
             "periodMs": 220, "ttlSec": 1,
         },
+        # A steady hold — "heard you, nothing more to do."
+        #
+        # Solid rather than a pulse on purpose: the two cues above are
+        # OUTCOMES and their rhythm says something went wrong or unheard.
+        # This one is an acknowledgement, and holding the listening colour
+        # steady reads as a continuation of the listening ring rather than a
+        # new signal to decode.
+        #
+        # It exists because a turn can now end in milliseconds. Home
+        # Assistant's satellite setup intercepts the wake word and ends the
+        # run immediately, so the ring lit and cleared inside ~100ms and read
+        # as a glitch — the device looked broken at exactly the moment it was
+        # working. Before the turn was released promptly it stayed lit only
+        # because the turn was hung, which is feedback by accident.
+        #
+        # 1s is the TTL floor the device supports and comfortably shorter
+        # than the gap between setup's two wake word prompts (measured at
+        # 3.0s and 5.6s on hardware), so it cannot bleed into the next one.
+        "ack_anim":       {
+            "pattern": "solid", "colors": outcome_colors,
+            "ttlSec": 1,
+        },
     }
 
 
