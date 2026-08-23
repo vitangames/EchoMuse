@@ -425,7 +425,7 @@ async def _serve_spa(request: web.Request) -> web.Response:
     return web.Response(
         text=_with_ingress_base(index.read_text(encoding="utf-8"), request),
         content_type="text/html",
-        headers={"Cache-Control": "no-cache"},
+        
     )
 
 
@@ -461,7 +461,7 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     return web.Response(
         text=page,
         content_type="text/html",
-        headers={"Cache-Control": "no-cache"},
+        
     )
 
 
