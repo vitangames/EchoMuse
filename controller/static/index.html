@@ -392,11 +392,15 @@
     // be under ingress: those differ when Supervisor forwards no user and the
     // person falls back to the password form, and hiding Sign out from them
     // would be the broken-looking button the rule exists to prevent.
+    // A release-specific URL prevents Home Assistant ingress from reusing an
+    // older cached /dashboard shell after an add-on update.
+    const DASHBOARD_URL = 'dashboard?ui=2.20.2-recorder.7';
+
     function enterDashboard(token, role, via) {
       localStorage.setItem('em_token', token);
       localStorage.setItem('em_role', role);
       localStorage.setItem('em_auth_via', via || 'password');
-      location.replace('dashboard');
+      location.replace(DASHBOARD_URL);
     }
 
     // ── Setup form ──
@@ -451,7 +455,7 @@
         try {
           const r = await fetch('api/auth/me',
             { headers: { Authorization: `Bearer ${token}` } });
-          if (r.ok) { location.replace('dashboard'); return; }
+          if (r.ok) { location.replace(DASHBOARD_URL); return; }
         } catch {}
         localStorage.removeItem('em_token');
         localStorage.removeItem('em_role');
