@@ -46,10 +46,22 @@ def test_dashboard_bundle_is_cache_busted():
         "the bundle URL must carry a cache-busting token"
     assert "no-cache" in handler, \
         "dashboard.html itself must be revalidated, or the new URL is never seen"
-    # A version-string token would not change between two local "dev" builds;
-    # mtime changes on every rebuild.
-    assert "st_mtime" in handler, \
-        "cache-bust on the bundle's mtime, not on a version string"
+    # A version-string token would not change between two local "dev" builds,
+    # while an mtime can be preserved or normalised by the image builder.
+    assert "sha256(bundle.read_bytes())" in handler, \
+        "cache-bust on the bundle contents, not metadata or a version string"
+
+
+def test_dashboard_bundle_forbids_stale_ingress_cache():
+    """The JS response itself must not be reusable by an ingress/browser cache."""
+    from pathlib import Path
+
+    src = (Path(__file__).resolve().parent.parent / "em_api.py").read_text()
+    assert 'add_get("/static/dashboard.js", _serve_dashboard_bundle)' in src
+    handler = src[src.index("async def _serve_dashboard_bundle"):]
+    handler = handler[:handler.index("\nasync def ", 1)]
+    assert "no-store" in handler
+    assert "must-revalidate" in handler
 
 
 def test_dashboard_paths_are_ingress_safe():

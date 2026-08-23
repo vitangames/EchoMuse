@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.20.2-recorder.2
+
+- Fixes stale dashboard JavaScript through Home Assistant Ingress after an
+  add-on update. The bundle URL now uses a content hash and the bundle response
+  explicitly disables caching.
+
 ## 2.20.2-recorder.1
 
 - Adds optional `tts_output_media_player` routing for every satellite. Empty

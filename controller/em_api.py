@@ -263,6 +263,11 @@ async def create_app() -> web.Application:
     # first-run form itself when setup is pending, so just send people there.
     app.router.add_get("/setup",      _redirect_root)
     app.router.add_get("/dashboard",  _serve_dashboard)
+    # The dashboard bundle gets an explicit no-store response. Home Assistant
+    # Ingress is another cache/proxy layer between aiohttp and the browser, so
+    # relying only on add_static's ETag/Last-Modified can leave an old UI
+    # running after an add-on update.
+    app.router.add_get("/static/dashboard.js", _serve_dashboard_bundle)
     app.router.add_static("/static",  STATIC_DIR)
     app.router.add_post("/api/setup", _post_setup)
     # Public (pre-auth) — the landing page needs to know which form to show.
@@ -436,11 +441,11 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     reads as "my change did not work" and sends you looking in the wrong place.
     It cost exactly that on 2026-07-30 when the new thermal row did not appear.
 
-    So the bundle URL carries the file's mtime. That changes on every rebuild
-    regardless of version numbering (controller_version is "dev" for local
-    builds and would not bust between two dev deploys), and the wrapper itself
-    is sent no-cache so the new URL is always seen — it is 3KB, revalidating it
-    costs nothing.
+    The bundle URL carries a digest of its contents. File mtimes are not a
+    reliable build identity: BuildKit can preserve or normalise timestamps,
+    and an ingress/browser cache may then reuse the previous bundle URL even
+    though the image changed. A content digest changes exactly when the JS
+    does, including between two local "dev" builds.
     """
     dashboard = STATIC_DIR / "dashboard.html"
     if not dashboard.exists():
@@ -448,14 +453,26 @@ async def _serve_dashboard(request: web.Request) -> web.Response:
     page = _with_ingress_base(dashboard.read_text(encoding="utf-8"), request)
     bundle = STATIC_DIR / "dashboard.js"
     if bundle.exists():
+        digest = hashlib.sha256(bundle.read_bytes()).hexdigest()[:16]
         page = page.replace(
             "static/dashboard.js",
-            f"static/dashboard.js?v={int(bundle.stat().st_mtime)}",
+            f"static/dashboard.js?v={digest}",
         )
     return web.Response(
         text=page,
         content_type="text/html",
         headers={"Cache-Control": "no-cache"},
+    )
+
+
+async def _serve_dashboard_bundle(request: web.Request) -> web.StreamResponse:
+    """Serve the UI bundle without allowing Ingress/browser stale reuse."""
+    bundle = STATIC_DIR / "dashboard.js"
+    if not bundle.exists():
+        return web.Response(status=503, text="dashboard.js not found in static/")
+    return web.FileResponse(
+        bundle,
+        headers={"Cache-Control": "no-store, max-age=0, must-revalidate"},
     )
 
 
