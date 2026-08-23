@@ -117,15 +117,22 @@ import dataclasses
 class TurnTrace:
     trigger:          str   = ""      # "wakeword(0.522)" or "button"
     t0:               float = 0.0     # turn start (time.monotonic())
+    t_pipeline_start_ms: int = -1     # HA accepted and started the Assist run
+    t_stt_start_ms:    int   = -1     # HA began speech-to-text processing
     t_first_frame_ms: int   = -1      # ms from t0 to first real audio frame
     t_vad_end_ms:     int   = -1      # ms from t0 to VAD sentinel received
     audio_frames:     int   = 0       # number of PCM frames sent to HA
     t_stt_ms:         int   = -1      # ms from t0 to STT result received
     stt_text:         str   = ""      # STT transcript
+    t_intent_start_ms: int = -1       # HA began intent processing
+    t_intent_end_ms:   int   = -1     # HA completed intent processing
+    t_tts_start_ms:    int   = -1     # HA started synthesising the reply
     t_tts_url_ms:     int   = -1      # ms from t0 to TTS URL received
     t_tts_fetched_ms: int   = -1      # ms from t0 to TTS audio fetched+decoded
     tts_bytes:        int   = 0       # decoded PCM bytes
     t_playback_ms:    int   = -1      # ms from t0 to playback started
+    t_tts_route_ms:   int   = -1      # ms from t0 to external-player request
+    tts_route:        str   = "dot"   # "dot" or "media_player"
     t_complete_ms:    int   = -1      # ms from t0 to turn complete
     # HA-side segment timings, derived from the marks above at emit time.
     # Broken out because "the turn felt slow" needs to point at a stage:
@@ -172,11 +179,16 @@ class TurnTrace:
             f"[TURN] trigger={self.trigger} outcome={self.outcome} "
             f"total={fmt(self.t_complete_ms)} "
             f"first_frame={fmt(self.t_first_frame_ms)} "
+            f"pipeline_start={fmt(self.t_pipeline_start_ms)} "
+            f"stt_start={fmt(self.t_stt_start_ms)} "
             f"vad_end={fmt(self.t_vad_end_ms)} audio={self.audio_frames}frames/{audio_ms}ms "
             f"stt={fmt(self.t_stt_ms)} text={self.stt_text!r} "
+            f"intent_start={fmt(self.t_intent_start_ms)} intent_end={fmt(self.t_intent_end_ms)} "
+            f"tts_start={fmt(self.t_tts_start_ms)} "
             f"tts_url={fmt(self.t_tts_url_ms)} "
             f"tts_fetch={fmt(self.t_tts_fetched_ms)} tts_bytes={self.tts_bytes} "
             f"playback={fmt(self.t_playback_ms)} "
+            f"tts_route={self.tts_route}@{fmt(self.t_tts_route_ms)} "
             f"| segments: ha_think={fmt(self.ha_think_ms)} "
             f"tts_gen={fmt(self.tts_gen_ms)} fetch={fmt(self.fetch_ms)}"
         )
@@ -741,6 +753,10 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # misses the 3×-floor test there).
             self._ha_vad_start.set()
 
+        elif event_type == ET.VOICE_ASSISTANT_STT_START:
+            if self._trace:
+                self._trace.t_stt_start_ms = self._trace.elapsed_ms()
+
         elif event_type == ET.VOICE_ASSISTANT_STT_VAD_END:
             # Speech ended — HA is now processing (STT → intent → TTS).
             # This is the "thinking" boundary: device detected VAD end,
@@ -761,18 +777,26 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             if self._on_stt_end and not self._turn_cancelled:
                 asyncio.create_task(self._on_stt_end(text))
 
+        elif event_type == ET.VOICE_ASSISTANT_INTENT_START:
+            if self._trace:
+                self._trace.t_intent_start_ms = self._trace.elapsed_ms()
+
         elif event_type == ET.VOICE_ASSISTANT_INTENT_END:
             # Reliable "STT + intent resolution genuinely finished" marker —
             # always arrives after STT_END, always before TTS_START/RUN_END
             # in a normal turn. Used to tell a real terminal RUN_END apart
             # from a premature/duplicate one (see RUN_END branch below).
             self._intent_ended = True
+            if self._trace:
+                self._trace.t_intent_end_ms = self._trace.elapsed_ms()
             if data.get("continue_conversation") == "1":
                 self._continue_conversation = True
                 log.debug(f"[{self._log_name}] HA requested conversation continuation")
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_START:
             log.info(f"[{self._log_name}] TTS starting")
+            if self._trace:
+                self._trace.t_tts_start_ms = self._trace.elapsed_ms()
 
         elif event_type == ET.VOICE_ASSISTANT_TTS_END:
             # TTS URL arrives here in some pipeline configurations.
@@ -793,6 +817,8 @@ class EchoMuseSatellite(SatelliteServerProtocol):
             # `_internal_on_pipeline_event(PipelineEvent(RUN_END))`, so no
             # RUN_START is ever sent. Structural, not a race on timing.
             self._run_started = True
+            if self._trace:
+                self._trace.t_pipeline_start_ms = self._trace.elapsed_ms()
 
         elif event_type == ET.VOICE_ASSISTANT_RUN_END:
             log.info(f"[{self._log_name}] Pipeline run ended")
@@ -1112,6 +1138,12 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                 # becomes the sole response output for this satellite.
                 if trace:
                     trace.t_playback_ms = trace.elapsed_ms()
+                    # Home Assistant accepts the action asynchronously. This
+                    # mark means "sent to the selected player", not that a
+                    # Cast receiver has audibly started — Cast has no return
+                    # signal on the ESPHome action channel.
+                    trace.t_tts_route_ms = trace.t_playback_ms
+                    trace.tts_route = "media_player"
                 try:
                     self._dispatch_tts_to_media_player(
                         tts_output_media_player, self._tts_audio_url
@@ -1217,14 +1249,21 @@ class EchoMuseSatellite(SatelliteServerProtocol):
                     "noise_floor":    wi.get("noise_floor"),
                     "outcome":        trace.outcome,
                     "total_ms":       trace.t_complete_ms,
+                    "pipeline_start_ms": trace.t_pipeline_start_ms,
+                    "stt_start_ms":  trace.t_stt_start_ms,
                     "vad_end_ms":     trace.t_vad_end_ms,
                     "stt_ms":         trace.t_stt_ms,
+                    "intent_start_ms": trace.t_intent_start_ms,
+                    "intent_end_ms": trace.t_intent_end_ms,
+                    "tts_start_ms":  trace.t_tts_start_ms,
                     "tts_url_ms":     trace.t_tts_url_ms,
                     "tts_fetch_ms":   trace.t_tts_fetched_ms,
                     "playback_ms":    trace.t_playback_ms,
                     "audio_ms":       trace.audio_frames * 80,
                     "tts_bytes":      trace.tts_bytes,
                     "stt_text":       trace.stt_text,
+                    "tts_route_ms":  trace.t_tts_route_ms,
+                    "tts_route":     trace.tts_route,
                 }
                 await _persist_turn(device, turn_record)
                 device.turn_history.append(turn_record)
