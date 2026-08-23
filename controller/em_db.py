@@ -801,6 +801,25 @@ MIGRATIONS: list[str] = [
 
     UPDATE system_config SET value = '19' WHERE key = 'schema_version';
     """,
+
+    # ── v20 — detailed Assist pipeline timing ──────────────────────────────
+    #
+    # The original activity view could distinguish "listening" from the
+    # combined HA response, but not whether a delay happened in STT, intent
+    # resolution, or speech synthesis. These marks arrive on the existing
+    # VoiceAssistant event stream; no microphone data or new HA permission is
+    # collected. NULL keeps historical turns readable.
+    """
+    ALTER TABLE turns ADD COLUMN pipeline_start_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN stt_start_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN intent_start_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN intent_end_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN tts_start_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN tts_route_ms INTEGER;
+    ALTER TABLE turns ADD COLUMN tts_route TEXT;
+
+    UPDATE system_config SET value = '20' WHERE key = 'schema_version';
+    """,
 ]
 
 # Post-migration fixups that need Python rather than SQL. Keyed by the schema
@@ -1830,11 +1849,18 @@ _TURN_COLUMNS = {
     "outcome":          "outcome",
     "stt_text":         "stt_text",
     "total_ms":         "total_ms",
+    "pipeline_start_ms": "pipeline_start_ms",
+    "stt_start_ms":     "stt_start_ms",
     "vad_end_ms":       "vad_end_ms",
     "stt_ms":           "stt_ms",
+    "intent_start_ms":  "intent_start_ms",
+    "intent_end_ms":    "intent_end_ms",
+    "tts_start_ms":     "tts_start_ms",
     "tts_url_ms":       "tts_url_ms",
     "tts_fetch_ms":     "tts_fetch_ms",
     "playback_ms":      "playback_ms",
+    "tts_route_ms":     "tts_route_ms",
+    "tts_route":        "tts_route",
     "audio_ms":         "audio_ms",
     "tts_bytes":        "tts_bytes",
     "underruns":        "underruns",

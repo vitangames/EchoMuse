@@ -1,5 +1,17 @@
 # Changelog
 
+## 2.20.2-recorder.4
+
+- Expands Activity into a per-turn Assist timeline: pipeline start, STT,
+  intent resolution, TTS synthesis, and local audio delivery are timed
+  separately. The former combined response span could not tell which stage
+  made the green ring wait.
+- Marks replies routed to an external `media_player` as "sent to external
+  player". This is the reliable boundary available through ESPHome; Google
+  Cast does not return the exact instant its speaker begins sounding.
+- Adds the timing columns through an additive database migration. Existing
+  history remains intact; only new turns have the extra detail.
+
 ## 2.20.2-recorder.3
 
 - Sends redirected Assist replies as normal `media_player.play_media` requests

@@ -775,19 +775,31 @@ function Shell({ deviceId, token, height = 320 }) {
 // tooltip name each stage.
 const TURN_STAGES = [
   { key: 'listen',     label: 'Listening',  color: '#4468a8' },
-  { key: 'transcribe', label: 'Transcribe', color: '#1f8a55' },
-  { key: 'respond',    label: 'Respond',    color: '#96660a' },
+  { key: 'transcribe', label: 'STT',         color: '#1f8a55' },
+  { key: 'intent',     label: 'Intent',      color: '#96660a' },
+  { key: 'synth',      label: 'TTS',         color: '#a84370' },
+  { key: 'delivery',   label: 'Delivery',    color: '#4d8190' },
 ];
 
 function turnSegments(t) {
-  // Stage durations from the trace timestamps; -1 = never reached.
+  // Stage durations from the trace timestamps; -1 = never reached. The
+  // middle three stages are exactly the interval when the Dot's green ring
+  // is waiting after the speaker has finished talking.
   const vad = t.vad_end_ms >= 0 ? t.vad_end_ms : -1;
-  const stt = t.stt_ms     >= 0 ? t.stt_ms     : -1;
+  const stt = t.stt_ms >= 0 ? t.stt_ms : -1;
+  const intentEnd = t.intent_end_ms >= 0 ? t.intent_end_ms : -1;
   const tts = t.tts_url_ms >= 0 ? t.tts_url_ms : -1;
+  const fetched = t.tts_fetch_ms >= 0 ? t.tts_fetch_ms : -1;
   const listen     = vad >= 0 ? vad : Math.max(t.total_ms || 0, 0);
   const transcribe = (stt >= 0 && vad >= 0) ? Math.max(stt - vad, 0) : 0;
-  const respond    = (tts >= 0 && stt >= 0) ? Math.max(tts - stt, 0) : 0;
-  return { listen, transcribe, respond, shown: listen + transcribe + respond };
+  // Older stored turns lack INTENT_END, so retain their useful combined
+  // response duration rather than rendering a misleading empty gap.
+  const intent = (intentEnd >= 0 && stt >= 0) ? Math.max(intentEnd - stt, 0) : 0;
+  const synthStart = intentEnd >= 0 ? intentEnd : stt;
+  const synth = (tts >= 0 && synthStart >= 0) ? Math.max(tts - synthStart, 0) : 0;
+  const delivery = (fetched >= 0 && tts >= 0) ? Math.max(fetched - tts, 0) : 0;
+  return { listen, transcribe, intent, synth, delivery,
+    shown: listen + transcribe + intent + synth + delivery };
 }
 
 function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMisses, stateLabel, stateColor, isAdmin }) {
@@ -886,6 +898,10 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
              color={turns.some(t => t.underruns > 0) ? 'var(--lcd-amber)' : 'var(--lcd-dim)'} size={16}/>
       </div>
 
+      <div style={{ fontFamily: mono, fontSize: 10, color: 'var(--muted)', margin: '-5px 0 13px' }}>
+        After you finish speaking, the moving green ring covers STT → Intent → TTS. Hover a row to see the exact split.
+      </div>
+
       {recent.length === 0 ? (
         <div style={{ fontFamily: mono, fontSize: 11, color: 'var(--muted)' }}>
           No voice turns recorded yet — history starts when the device is next used.
@@ -955,7 +971,11 @@ function TurnObservability({ turns, deviceId, deviceLabel, recordingsOn, nearMis
             return (
               <div style={{ marginTop: 10, background: 'var(--hairline)', border: '1px solid var(--track)', borderRadius: 6, padding: '8px 12px', fontFamily: mono, fontSize: 10, color: 'var(--text2)', lineHeight: 1.7 }}>
                 <span style={{ color: 'var(--muted)' }}>{t.trigger}</span>
-                {' · '}listening {fmtS(seg.listen)} · transcribe {fmtS(seg.transcribe)} · respond {fmtS(seg.respond)} · total {fmtS(Math.max(t.total_ms, 0))}
+                {' · '}listening {fmtS(seg.listen)} · STT {fmtS(seg.transcribe)} · intent {fmtS(seg.intent)} · TTS {fmtS(seg.synth)}
+                {seg.delivery > 0 ? <> · delivery {fmtS(seg.delivery)}</> : null}
+                {' · '}total {fmtS(Math.max(t.total_ms, 0))}
+                <br/>HA pipeline {t.pipeline_start_ms >= 0 ? fmtS(t.pipeline_start_ms) : '—'} · speech ends {t.vad_end_ms >= 0 ? fmtS(t.vad_end_ms) : '—'} · transcript {t.stt_ms >= 0 ? fmtS(t.stt_ms) : '—'} · reply ready {t.tts_url_ms >= 0 ? fmtS(t.tts_url_ms) : '—'}
+                {t.tts_route === 'media_player' ? <><br/><span style={{ color: 'var(--lcd-amber)' }}>Sent to external player {t.tts_route_ms >= 0 ? fmtS(t.tts_route_ms) : '—'}.</span> Cast does not report the instant sound becomes audible; check the Cast log for delivery failures.</> : null}
                 {t.wake_model ? <><br/>wake {t.wake_model.replace(/\.[a-z]+$/, '').split('/').pop()} score {t.wake_score?.toFixed(3)} (thr {t.wake_threshold?.toFixed(2)}) · noise floor {t.noise_floor?.toFixed(4)}</> : null}
                 {t.underruns != null ? <>{t.wake_model ? ' · ' : <br/>}underruns <span style={{ color: t.underruns > 0 ? 'var(--warn)' : 'inherit' }}>{t.underruns}</span></> : null}
                 {t.stt_text ? <><br/>“{t.stt_text.length > 90 ? t.stt_text.slice(0, 90) + '…' : t.stt_text}”</> : null}

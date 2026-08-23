@@ -41,6 +41,22 @@ def test_a_multi_version_jump_migrates_and_keeps_the_data(tmp_path):
     assert c.execute("SELECT label FROM devices").fetchone()[0] == "Kitchen"
 
 
+def test_v19_to_v20_adds_detailed_assist_timing_without_losing_turns(tmp_path):
+    """The monitoring update must be safe for the currently shipped add-on."""
+    p = _legacy_db(tmp_path, upto=19)
+    c = sqlite3.connect(p)
+    c.execute("INSERT INTO turns (device_id, ts, outcome) VALUES ('D', 1, 'ok')")
+    c.commit()
+    c.close()
+
+    em_db.init(p)
+    c = sqlite3.connect(p)
+    cols = {row[1] for row in c.execute("PRAGMA table_info(turns)")}
+    assert {"pipeline_start_ms", "stt_start_ms", "intent_start_ms",
+            "intent_end_ms", "tts_start_ms", "tts_route_ms", "tts_route"} <= cols
+    assert c.execute("SELECT outcome FROM turns").fetchone()[0] == "ok"
+
+
 def test_a_backup_is_taken_before_migrating(tmp_path):
     """
     Every migration so far is additive, which is about as safe as schema
