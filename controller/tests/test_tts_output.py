@@ -32,7 +32,7 @@ def test_only_media_player_entities_are_accepted(bad):
         tts.normalise_entity_id(bad)
 
 
-def test_service_payload_is_an_announcement_for_one_target():
+def test_service_payload_uses_portable_plain_playback_for_one_target():
     data = tts.play_media_data(
         "media_player.kitchen", "http://ha.local:8123/api/tts_proxy/reply.flac"
     )
@@ -40,7 +40,6 @@ def test_service_payload_is_an_announcement_for_one_target():
         "entity_id": "media_player.kitchen",
         "media_content_id": "http://ha.local:8123/api/tts_proxy/reply.flac",
         "media_content_type": "music",
-        "announce": "true",
     }
 
 

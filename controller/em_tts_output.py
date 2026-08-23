@@ -38,7 +38,7 @@ def normalise_entity_id(value) -> str:
 
 
 def play_media_data(entity_id: str, media_url: str) -> dict[str, str]:
-    """Build the string map carried by ESPHome HomeassistantActionRequest."""
+    """Build a portable ``media_player.play_media`` action request."""
     target = normalise_entity_id(entity_id)
     if not target:
         raise ValueError(f"{CONFIG_KEY} is empty")
@@ -48,7 +48,4 @@ def play_media_data(entity_id: str, media_url: str) -> dict[str, str]:
         "entity_id": target,
         "media_content_id": media_url.strip(),
         "media_content_type": "music",
-        # Announcement-capable players temporarily interrupt and then resume
-        # existing media. HA's schema coerces this ESPHome string-map value.
-        "announce": "true",
     }

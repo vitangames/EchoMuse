@@ -1,5 +1,11 @@
 # Changelog
 
+## 2.20.2-recorder.3
+
+- Sends redirected Assist replies as normal `media_player.play_media` requests
+  rather than `announce` requests. This avoids the Google Cast
+  `bypass_proxy` compatibility failure in Home Assistant 2026.8.3.
+
 ## 2.20.2-recorder.2
 
 - Fixes stale dashboard JavaScript through Home Assistant Ingress after an

@@ -406,7 +406,7 @@ class EchoMuseSatellite(SatelliteServerProtocol):
         return 1.0
 
     def _dispatch_tts_to_media_player(self, entity_id: str, media_url: str) -> None:
-        """Ask Home Assistant to play this Assist response as an announcement."""
+        """Ask Home Assistant to play this Assist response on the selected player."""
         if not self._ha_service_calls_subscribed:
             raise RuntimeError(
                 "Home Assistant has not subscribed to ESPHome action calls"
