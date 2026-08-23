@@ -109,13 +109,21 @@ def _legacy_fleet(tmp_path, serials):
     db.init(str(path))
     for i, s in enumerate(serials):
         db.register_new_device(s, f"10.0.0.{i+2}", "v2.12.0")
-    # Rewind to v18 with the column dropped, as a real pre-v19 database is.
+    # Rewind to v18 with every later column dropped, as a real pre-v19
+    # database is. Keep this fixture faithful when later migrations appear:
+    # otherwise a migration could try to add a column that the fixture has
+    # accidentally retained from the current schema.
     with db._tx() as conn:
         conn.execute("UPDATE devices SET esphome_mac = NULL")
         conn.execute("ALTER TABLE devices DROP COLUMN esphome_mac")
+        for column in (
+            "pipeline_start_ms", "stt_start_ms", "intent_start_ms",
+            "intent_end_ms", "tts_start_ms", "tts_route_ms", "tts_route",
+        ):
+            conn.execute(f"ALTER TABLE turns DROP COLUMN {column}")
         conn.execute("UPDATE system_config SET value = '18' WHERE key = 'schema_version'")
     db._conn.close(); db._conn = None
-    db.init(str(path))            # runs v19 + its fixup
+    db.init(str(path))            # runs v19 onward and their fixups
     return {s: db.get_device(s)["esphome_mac"] for s in serials}
 
 
@@ -156,9 +164,10 @@ def test_the_migration_leaves_every_device_with_a_distinct_identity(tmp_path):
 def test_migrations_are_append_only():
     """
     The stored schema_version is an index into MIGRATIONS, so appending to a
-    deployed entry corrupts every database that already ran it. v19 must be a
-    new entry, and v18 must be untouched.
+    deployed entry corrupts every database that already ran it. v20 must be a
+    new entry, and the prior v19 device-identity migration must be untouched.
     """
-    assert len(db.MIGRATIONS) == 19
+    assert len(db.MIGRATIONS) == 20
     assert "esphome_mac" in db.MIGRATIONS[18]
     assert "esphome_mac" not in db.MIGRATIONS[17]
+    assert "pipeline_start_ms" in db.MIGRATIONS[19]
